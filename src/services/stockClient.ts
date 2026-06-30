@@ -45,6 +45,13 @@ export interface StockRow {
   quantityUsed: number;
 }
 
+export interface StockSite {
+  id: string;
+  name: string;
+  type: 'STORAGE' | 'EXIT';
+  isActive: boolean;
+}
+
 function makeClient(token: string): AxiosInstance {
   return axios.create({
     baseURL: STOCK_API_URL,
@@ -101,6 +108,31 @@ export class StockClient {
    */
   getStocks(): Promise<StockRow[]> {
     return wrap(makeClient(this.token).get(`/stocks`));
+  }
+
+  getSites(): Promise<StockSite[]> {
+    return wrap(makeClient(this.token).get(`/sites`));
+  }
+
+  /**
+   * Find the "atelier" site to source assembly components from. We prefer
+   * a site whose name starts with "Atelier" (case-insensitive), else fall
+   * back to the first active STORAGE site. Throws when no candidate exists.
+   */
+  async getAtelierSite(): Promise<StockSite> {
+    const sites = await this.getSites();
+    const atelier = sites.find(
+      (s) => s.isActive && /^atelier/i.test(s.name),
+    );
+    if (atelier) return atelier;
+    const fallback = sites.find((s) => s.isActive && s.type === 'STORAGE');
+    if (!fallback) {
+      throw new AppError(
+        "Aucun site STORAGE actif côté Stock — impossible de sourcer l'assemblage",
+        500,
+      );
+    }
+    return fallback;
   }
 
   /**

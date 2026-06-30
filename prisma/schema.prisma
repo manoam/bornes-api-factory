@@ -78,16 +78,49 @@ model AssemblyOrder {
   operatorId          String?
   operatorName        String?
   notes               String?
+  /// JSON array of completed quality-check ids. Hardcoded in the frontend
+  /// for the MVP; future versions will pull a configurable list per model.
+  qualityChecks       Json?
   startedAt           DateTime?
   completedAt         DateTime?
   createdAt           DateTime            @default(now())
   updatedAt           DateTime            @updatedAt
 
   components          AssemblyComponent[]
+  events              AssemblyOrderEvent[]
 
   @@index([productionOrderId])
   @@index([status])
   @@map("assembly_orders")
+}
+
+/// Append-only audit log for an AssemblyOrder. Drives the History panel
+/// in the UI and gives traceability for compliance/warranty later.
+///
+/// `eventType` is a free string by design — we add new event kinds without
+/// migrating an enum. Documented values used by the controllers:
+///   - STARTED                 — operator clicked "Démarrer"
+///   - STATUS_CHANGED          — payload: { from, to }
+///   - COMPONENT_INSTALLED     — payload: { productRef, serialNumber? }
+///   - COMPONENT_REMOVED       — payload: { productRef, serialNumber? }
+///   - NOTES_UPDATED
+///   - INTERNAL_NUMBER_SET     — payload: { value }
+///   - QUALITY_CHECKED         — payload: { checkId }
+///   - QUALITY_UNCHECKED       — payload: { checkId }
+///   - COMPLETED               — payload: { internalNumber, movementsCreated }
+///   - CANCELLED               — payload: { reason? }
+model AssemblyOrderEvent {
+  id                String         @id @default(uuid())
+  assemblyOrderId   String
+  assemblyOrder     AssemblyOrder  @relation(fields: [assemblyOrderId], references: [id], onDelete: Cascade)
+  eventType         String
+  payload           Json?
+  actorId           String?
+  actorName         String?
+  createdAt         DateTime       @default(now())
+
+  @@index([assemblyOrderId, createdAt])
+  @@map("assembly_order_events")
 }
 
 /// One component installed (or planned) on a specific assembly.

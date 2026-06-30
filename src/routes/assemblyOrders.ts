@@ -4,7 +4,10 @@ import * as ctrl from '../controllers/assemblyOrderController';
 const router = Router();
 
 router.get('/:id', ctrl.get as any);
+router.get('/:id/checklist', ctrl.checklist as any);
+router.get('/:id/history', ctrl.history as any);
 router.patch('/:id', ctrl.update as any);
+router.post('/:id/transition', ctrl.transition as any);
 router.post('/:id/components', ctrl.addComponent as any);
 router.delete('/:id/components/:componentId', ctrl.removeComponent as any);
 
