@@ -123,6 +123,30 @@ model AssemblyOrderEvent {
   @@map("assembly_order_events")
 }
 
+/// Read-only local copy of Konitys users, fed by the `*.users.*` RabbitMQ
+/// events via `services/refSync.ts`. NEVER write to this table from the
+/// app — refSync is the only writer.
+///
+/// Columns are nullable on purpose (except `id`): the publisher may emit
+/// partial rows or new columns, and we just upsert what we recognize.
+///
+/// Used by `OperatorAvatar` to render photos and full names for assembly
+/// operators throughout the UI.
+model UserRef {
+  id         Int       @id
+  email      String?
+  nom        String?
+  prenom     String?
+  username   String?
+  photo_nom  String?
+  photo_url  String?
+  actif      Boolean?
+  created_at DateTime? @db.Timestamptz
+  updated_at DateTime? @db.Timestamptz
+
+  @@map("users_ref")
+}
+
 /// One component installed (or planned) on a specific assembly.
 ///
 /// `productId` and `productReference` are NOT FKs — they live in Stock.

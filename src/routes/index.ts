@@ -2,6 +2,7 @@ import { Router } from 'express';
 import productionOrderRoutes from './productionOrders';
 import assemblyOrderRoutes from './assemblyOrders';
 import producedBorneRoutes from './producedBornes';
+import userRefRoutes from './userRef';
 import { authenticate } from '../middleware/auth';
 
 const router = Router();
@@ -17,5 +18,6 @@ router.use(authenticate as any);
 router.use('/production-orders', productionOrderRoutes);
 router.use('/assembly-orders', assemblyOrderRoutes);
 router.use('/produced-bornes', producedBorneRoutes);
+router.use('/users-ref', userRefRoutes);
 
 export default router;

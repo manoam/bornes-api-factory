@@ -5,7 +5,7 @@ import { AppError } from '../middleware/errorHandler';
 import { AuthenticatedRequest } from '../types/auth';
 import { logAssemblyEvent } from '../services/assemblyEventLog';
 import { stockClientFor } from '../services/stockClient';
-import { publishCrudEvent } from '../services/rabbitmq';
+import { publishEvent } from '../services/rabbitmqHttp';
 import { QUALITY_CHECKS, REQUIRED_QUALITY_CHECK_IDS } from '../config/qualityChecks';
 
 const updateSchema = z.object({
@@ -582,7 +582,7 @@ export async function transition(
       //
       //    Subscribers (Bornes for sure, possibly BI/Stock later):
       //      factory.assembly_orders.completed
-      void publishCrudEvent(
+      void publishEvent(
         'assembly_orders',
         'completed',
         {
@@ -623,7 +623,7 @@ export async function transition(
         return u;
       });
 
-      void publishCrudEvent(
+      void publishEvent(
         'assembly_orders',
         'cancelled',
         {
