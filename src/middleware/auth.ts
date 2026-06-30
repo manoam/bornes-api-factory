@@ -72,6 +72,37 @@ function extractRoles(payload: JwtPayload): string[] {
   return [...new Set<string>([...realm, ...client])];
 }
 
+/**
+ * Calcule un nom affichable à partir des claims, dans l'ordre de préférence:
+ *   1. claim `name` (Keycloak "full name", peuplé si l'admin a renseigné
+ *      First + Last name)
+ *   2. given_name + family_name si au moins l'un des deux est présent
+ *   3. préfixe email avant @ (ex: "dev" pour dev@selfizee.fr)
+ *   4. preferred_username SAUF s'il a le format laid des IdP fédérés
+ *      `f:{realm-id}:{user-id}` — dans ce cas on retombe sur "Utilisateur".
+ *
+ * On stocke ce résultat dans createdByName/operatorName etc. côté DB. Si
+ * jamais l'admin Keycloak remplit ensuite First/Last name, les NOUVEAUX
+ * enregistrements seront propres ; les anciens restent tels quels (acceptable
+ * pour le MVP).
+ */
+function computeDisplayName(payload: JwtPayload): string {
+  const p = payload as any;
+  if (typeof p.name === 'string' && p.name.trim()) return p.name.trim();
+  const composed = [p.given_name, p.family_name]
+    .filter((v) => typeof v === 'string' && v.trim())
+    .join(' ')
+    .trim();
+  if (composed) return composed;
+  if (typeof p.email === 'string' && p.email.includes('@')) {
+    return p.email.split('@')[0];
+  }
+  const username = typeof p.preferred_username === 'string' ? p.preferred_username : '';
+  // Format Keycloak des users fédérés: `f:<uuid>:<numeric>` — illisible.
+  if (username && !/^f:[\w-]+:\d+$/.test(username)) return username;
+  return 'Utilisateur';
+}
+
 export async function authenticate(req: Request, res: Response, next: NextFunction) {
   try {
     const header = req.headers.authorization;
@@ -87,7 +118,7 @@ export async function authenticate(req: Request, res: Response, next: NextFuncti
       username: (payload as any).preferred_username || String(payload.sub),
       firstName: (payload as any).given_name,
       lastName: (payload as any).family_name,
-      fullName: (payload as any).name,
+      fullName: computeDisplayName(payload),
       roles: extractRoles(payload),
       rawToken: token,
     };
