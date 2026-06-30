@@ -28,6 +28,140 @@ const transitionSchema = z.object({
   reason: z.string().optional(),
 });
 
+// ---------- LIST ----------
+
+const STATUS_VALUES = ['DRAFT', 'IN_PROGRESS', 'TESTING', 'COMPLETED', 'CANCELLED'] as const;
+type StatusValue = typeof STATUS_VALUES[number];
+
+function parseStatusFilter(raw: string | undefined): StatusValue[] | undefined {
+  if (!raw) return undefined;
+  const parts = raw
+    .split(',')
+    .map((s) => s.trim().toUpperCase())
+    .filter((s): s is StatusValue => (STATUS_VALUES as readonly string[]).includes(s));
+  return parts.length > 0 ? parts : undefined;
+}
+
+/**
+ * GET /assembly-orders
+ *
+ * Liste paginée + filtres + stats globales par statut.
+ * Query params supportés:
+ *   - status=DRAFT,IN_PROGRESS   (multi-statut sépare par virgule)
+ *   - model=Borne Kalifun         (exact match sur productionOrder.model)
+ *   - operatorId=<keycloak-sub>
+ *   - mine=true                   (raccourci: filtre sur req.user.id)
+ *   - search=K001                 (substring sur internalNumber + model)
+ *   - limit / offset              (défaut 50 / 0, limit cap à 200)
+ *
+ * Réponse contient aussi `stats` (count par statut, sans le filtre `status`
+ * appliqué) pour alimenter les KPIs en haut de la page. Les autres filtres
+ * SONT appliqués aux stats — sinon on afficherait des compteurs incoherents.
+ */
+export async function list(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+  try {
+    const statusFilter = parseStatusFilter(req.query.status as string | undefined);
+    const model = (req.query.model as string | undefined)?.trim() || undefined;
+    const search = (req.query.search as string | undefined)?.trim() || undefined;
+    const mine = req.query.mine === 'true' || req.query.mine === '1';
+    const operatorId = mine
+      ? req.user.id
+      : ((req.query.operatorId as string | undefined)?.trim() || undefined);
+    const limit = Math.min(
+      Math.max(parseInt((req.query.limit as string) || '50', 10) || 50, 1),
+      200,
+    );
+    const offset = Math.max(parseInt((req.query.offset as string) || '0', 10) || 0, 0);
+
+    // Filtres "base" (tout sauf status) — utilisés pour les stats et pour la
+    // requête list (où on rajoute status par-dessus).
+    const baseWhere: any = {};
+    if (model) baseWhere.productionOrder = { model };
+    if (operatorId) baseWhere.operatorId = operatorId;
+    if (search) {
+      baseWhere.OR = [
+        { internalNumber: { contains: search, mode: 'insensitive' } },
+        { productionOrder: { model: { contains: search, mode: 'insensitive' } } },
+      ];
+    }
+
+    const listWhere: any = { ...baseWhere };
+    if (statusFilter) listWhere.status = { in: statusFilter };
+
+    const [rows, total, statsRaw] = await Promise.all([
+      prisma.assemblyOrder.findMany({
+        where: listWhere,
+        include: {
+          productionOrder: { select: { id: true, model: true, quantity: true } },
+          _count: { select: { components: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+        take: limit,
+        skip: offset,
+      }),
+      prisma.assemblyOrder.count({ where: listWhere }),
+      prisma.assemblyOrder.groupBy({
+        by: ['status'],
+        where: baseWhere,
+        _count: { _all: true },
+      }),
+    ]);
+
+    const stats: Record<StatusValue, number> = {
+      DRAFT: 0,
+      IN_PROGRESS: 0,
+      TESTING: 0,
+      COMPLETED: 0,
+      CANCELLED: 0,
+    };
+    for (const s of statsRaw) {
+      stats[s.status as StatusValue] = s._count._all;
+    }
+
+    // Enrichir avec componentsRequired (qté items dans la BOM). On batch un
+    // seul appel à Stock pour récupérer tous les assembly types et on les
+    // indexe par nom — sinon c'est N+1 (un fetch par assemblage).
+    const models = Array.from(new Set(rows.map((r) => r.productionOrder.model)));
+    const requiredByModel = new Map<string, number>();
+    if (models.length > 0) {
+      try {
+        const stock = stockClientFor(req.user.rawToken);
+        const allTypes = await stock.getAssemblyTypes();
+        for (const t of allTypes) {
+          if (models.includes(t.name)) {
+            requiredByModel.set(t.name, t.items?.length ?? 0);
+          }
+        }
+      } catch {
+        // Stock down: pas grave, on renvoie requiredCount=null pour ces lignes.
+      }
+    }
+
+    const data = rows.map((r) => ({
+      id: r.id,
+      internalNumber: r.internalNumber,
+      status: r.status,
+      operatorId: r.operatorId,
+      operatorName: r.operatorName,
+      startedAt: r.startedAt,
+      completedAt: r.completedAt,
+      createdAt: r.createdAt,
+      productionOrder: r.productionOrder,
+      componentsInstalled: r._count.components,
+      componentsRequired: requiredByModel.get(r.productionOrder.model) ?? null,
+    }));
+
+    res.json({
+      success: true,
+      data,
+      stats,
+      pagination: { total, limit, offset },
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
 // ---------- GET / PATCH basics ----------
 
 export async function get(req: AuthenticatedRequest, res: Response, next: NextFunction) {

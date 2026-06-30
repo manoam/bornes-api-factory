@@ -3,6 +3,7 @@ import * as ctrl from '../controllers/assemblyOrderController';
 
 const router = Router();
 
+router.get('/', ctrl.list as any);
 router.get('/:id', ctrl.get as any);
 router.get('/:id/checklist', ctrl.checklist as any);
 router.get('/:id/history', ctrl.history as any);
