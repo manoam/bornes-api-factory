@@ -1,0 +1,48 @@
+# Local development compose for the Factory API.
+# Brings up Postgres + the server. The frontend lives in a separate repo
+# (konitys-factory) — run its own `docker compose up` next to this one.
+services:
+  db:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: bornes_factory_dev
+    ports:
+      - '5435:5432'
+    volumes:
+      - factory_db:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d bornes_factory_dev']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  server:
+    build:
+      context: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/bornes_factory_dev
+      PORT: '3201'
+      CORS_ORIGIN: http://localhost:5273
+      # Adjust to your local Keycloak setup.
+      KEYCLOAK_URL: https://keycloak.orkessi.com
+      KEYCLOAK_REALM: konitys
+      KEYCLOAK_CLIENT_ID: stock-management
+      APP_KEY: factory
+      # Stock API runs on the host (or in another compose). host.docker.internal
+      # works on Docker Desktop (Windows/Mac); on Linux we add the extra_hosts
+      # mapping below so the same address resolves there too.
+      STOCK_API_URL: http://host.docker.internal:3001/api
+    ports:
+      - '3201:3201'
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+
+volumes:
+  factory_db:

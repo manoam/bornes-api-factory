@@ -1,0 +1,118 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum ProductionOrderStatus {
+  DRAFT
+  PLANNED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum ProductionOrderPriority {
+  LOW
+  NORMAL
+  HIGH
+}
+
+enum AssemblyOrderStatus {
+  DRAFT
+  IN_PROGRESS
+  TESTING
+  COMPLETED
+  CANCELLED
+}
+
+enum AssemblyComponentStatus {
+  RESERVED
+  INSTALLED
+  REPLACED
+  REMOVED
+}
+
+/// One ProductionOrder = the decision to build N bornes of a given model.
+/// Doesn't represent any specific borne yet — just the intent. When
+/// validated, it spawns N AssemblyOrders.
+model ProductionOrder {
+  id              String                  @id @default(uuid())
+  /// Free-text model identifier. Mirrors the `assembly_type.name` on the
+  /// Stock side (e.g. "Borne Kalifun"). Not an FK — Factory doesn't own
+  /// the Stock catalog.
+  model           String
+  quantity        Int
+  status          ProductionOrderStatus   @default(DRAFT)
+  priority        ProductionOrderPriority @default(NORMAL)
+  /// Why this order exists ("saison ete", "commande client X", ...).
+  reason          String?
+  targetDate      DateTime?
+  /// Keycloak sub of the creator (no FK to a local User table; we cache
+  /// the name for display so the UI doesn't need to round-trip).
+  createdById     String
+  createdByName   String?
+  createdAt       DateTime                @default(now())
+  updatedAt       DateTime                @updatedAt
+
+  assemblyOrders  AssemblyOrder[]
+
+  @@index([status])
+  @@index([createdAt])
+  @@map("production_orders")
+}
+
+/// One AssemblyOrder = one borne in the process of being built. A
+/// ProductionOrder of `quantity=10` produces 10 AssemblyOrders.
+model AssemblyOrder {
+  id                  String              @id @default(uuid())
+  productionOrderId   String
+  productionOrder     ProductionOrder     @relation(fields: [productionOrderId], references: [id], onDelete: Cascade)
+  /// Internal Konitys numbering attributed at completion. Format defined
+  /// by Bornes app (e.g. "S401" for a Spherik #401). NULL until completed.
+  internalNumber      String?
+  status              AssemblyOrderStatus @default(DRAFT)
+  operatorId          String?
+  operatorName        String?
+  notes               String?
+  startedAt           DateTime?
+  completedAt         DateTime?
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+
+  components          AssemblyComponent[]
+
+  @@index([productionOrderId])
+  @@index([status])
+  @@map("assembly_orders")
+}
+
+/// One component installed (or planned) on a specific assembly.
+///
+/// `productId` and `productReference` are NOT FKs — they live in Stock.
+/// We cache the reference here so the Factory UI can render assembly
+/// detail without round-tripping to Stock on every render.
+///
+/// When `status = INSTALLED`, the matching Stock movement OUT has already
+/// been requested (via stockClient.createMovement).
+model AssemblyComponent {
+  id                String                  @id @default(uuid())
+  assemblyOrderId   String
+  assemblyOrder     AssemblyOrder           @relation(fields: [assemblyOrderId], references: [id], onDelete: Cascade)
+  productId         String
+  productReference  String
+  /// Serial number for tracked products. Null for quantitative items.
+  serialNumber      String?
+  quantity          Int                     @default(1)
+  status            AssemblyComponentStatus @default(RESERVED)
+  installedAt       DateTime?
+  removedAt         DateTime?
+  createdAt         DateTime                @default(now())
+
+  @@index([assemblyOrderId])
+  @@index([productId])
+  @@map("assembly_components")
+}
