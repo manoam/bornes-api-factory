@@ -22,6 +22,35 @@ const updateSchema = z.object({
   targetDate: z.string().datetime().optional().nullable(),
 });
 
+// GET /production-orders/available-models
+//
+// Proxy thin pour la dropdown "Modèle" du formulaire de création d'OF.
+// Récupère les noms des AssemblyType chez Stock et renvoie juste ce qu'on
+// a besoin pour le select (id, name, itemCount). Le client ne touche pas
+// Stock directement — on garde l'intégration HTTP centralisée ici.
+export async function availableModels(
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction,
+) {
+  try {
+    const stock = stockClientFor(req.user.rawToken);
+    const types = await stock.getAssemblyTypes();
+    const models = types
+      .map((t) => ({
+        id: t.id,
+        name: t.name,
+        description: t.description,
+        itemCount: t.items?.length ?? 0,
+      }))
+      // Tri alpha pour stabilité d'affichage.
+      .sort((a, b) => a.name.localeCompare(b.name));
+    res.json({ success: true, data: models });
+  } catch (err) {
+    next(err);
+  }
+}
+
 // GET /production-orders
 export async function list(req: AuthenticatedRequest, res: Response, next: NextFunction) {
   try {

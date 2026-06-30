@@ -10,6 +10,9 @@ const router = Router();
 // V1.1: once the Konitys permissions system is wired in (data-perm + the
 // /adminpanel/permissions-schema endpoint), bring back per-action gating via
 // `requirePerm('factory', 'production_orders.create')` etc.
+// `/available-models` doit être DÉCLARÉ AVANT `/:id` sinon Express
+// l'attrape comme un id de production order.
+router.get('/available-models', ctrl.availableModels as any);
 router.get('/', ctrl.list as any);
 router.get('/:id', ctrl.get as any);
 router.get('/:id/requirements', ctrl.requirements as any);

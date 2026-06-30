@@ -91,14 +91,20 @@ export class StockClient {
   }
 
   /**
+   * Returns the full list of assembly types (BOMs) defined in Stock. Used
+   * to populate the "Modèle" dropdown when creating a ProductionOrder.
+   */
+  getAssemblyTypes(): Promise<StockAssemblyType[]> {
+    return wrap(makeClient(this.token).get(`/assembly-types`));
+  }
+
+  /**
    * Returns the assembly type by name (e.g. "Borne Kalifun") with its
    * full BOM. Used by Factory to compute the component requirements for
    * a production order.
    */
   async getAssemblyTypeByName(name: string): Promise<StockAssemblyType | null> {
-    const all = await wrap<StockAssemblyType[]>(
-      makeClient(this.token).get(`/assembly-types`),
-    );
+    const all = await this.getAssemblyTypes();
     return all.find((at) => at.name === name) || null;
   }
 
