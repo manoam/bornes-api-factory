@@ -5,6 +5,7 @@ import { AppError } from '../middleware/errorHandler';
 import { AuthenticatedRequest } from '../types/auth';
 import { logAssemblyEvent } from '../services/assemblyEventLog';
 import { stockClientFor } from '../services/stockClient';
+import { publishCrudEvent } from '../services/rabbitmq';
 import { QUALITY_CHECKS, REQUIRED_QUALITY_CHECK_IDS } from '../config/qualityChecks';
 
 const updateSchema = z.object({
@@ -440,6 +441,34 @@ export async function transition(
         return u;
       });
 
+      // 4. Broadcast on the platform bus. Done AFTER the DB commit so a
+      //    failed publish never leaves us in "event sent but state not
+      //    persisted". A failed publish is logged and forgotten — the
+      //    business operation succeeded, the bus is best-effort.
+      //
+      //    Subscribers (Bornes for sure, possibly BI/Stock later):
+      //      factory.assembly_orders.completed
+      void publishCrudEvent(
+        'assembly_orders',
+        'completed',
+        {
+          id: updated.id,
+          internalNumber: updated.internalNumber,
+          productionOrderId: updated.productionOrderId,
+          model: existing.productionOrder.model,
+          completedAt: updated.completedAt,
+          operator: updated.operatorName,
+          movementsCreated,
+          components: updated.components.map((c) => ({
+            productId: c.productId,
+            productReference: c.productReference,
+            serialNumber: c.serialNumber,
+            quantity: c.quantity,
+          })),
+        },
+        req.user,
+      );
+
       return res.json({ success: true, data: { order: updated, movementsCreated } });
     }
 
@@ -459,6 +488,20 @@ export async function transition(
         });
         return u;
       });
+
+      void publishCrudEvent(
+        'assembly_orders',
+        'cancelled',
+        {
+          id: updated.id,
+          internalNumber: updated.internalNumber,
+          productionOrderId: updated.productionOrderId,
+          model: existing.productionOrder.model,
+          reason: body.reason || null,
+        },
+        req.user,
+      );
+
       return res.json({ success: true, data: { order: updated } });
     }
 
