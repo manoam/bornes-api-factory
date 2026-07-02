@@ -36,6 +36,32 @@ enum AssemblyComponentStatus {
   REMOVED
 }
 
+enum RepairOrderStatus {
+  DRAFT
+  IN_PROGRESS
+  TESTING
+  COMPLETED
+  CANCELLED
+}
+
+/// REMOVED = piece deposee de la borne (mvt Stock IN)
+/// INSTALLED = piece neuve/reconditionnee mise dans la borne (mvt Stock OUT)
+enum RepairComponentAction {
+  REMOVED
+  INSTALLED
+}
+
+/// Ce qu'on fait de la piece qu'on vient de retirer.
+/// TO_TEST = on la met en stock avec un flag "a tester" pour le SAV interne
+/// SCRAP   = poubelle (mvt Stock IN puis note interne, la piece n'entre pas
+///           reellement en stock reutilisable)
+/// STOCK_USED = elle est encore bonne, la remettre en stock condition USED
+enum RepairComponentDisposition {
+  TO_TEST
+  SCRAP
+  STOCK_USED
+}
+
 /// One ProductionOrder = the decision to build N bornes of a given model.
 /// Doesn't represent any specific borne yet — just the intent. When
 /// validated, it spawns N AssemblyOrders.
@@ -172,4 +198,91 @@ model AssemblyComponent {
   @@index([assemblyOrderId])
   @@index([productId])
   @@map("assembly_components")
+}
+
+/// Un RepairOrder = 1 borne physique en cours de reparation.
+///
+/// La borne est identifiee par `borneInternalNumber` (ex: "K001"). Elle
+/// peut venir de Factory (assemblage Factory qu'on connait) ou directement
+/// de Bornes (borne creee par l'app parc du collegue). `sourceApp` note
+/// d'ou vient la reference — utile pour tracer et pour retrouver la
+/// composition existante quand elle vient de Factory.
+///
+/// A la validation (COMPLETED), on publie `factory.repair_orders.completed`
+/// pour que Bornes mette a jour l'etat de la borne dans le parc.
+model RepairOrder {
+  id                  String            @id @default(uuid())
+  /// Numero interne de la borne. Format libre (ex "K001", "S401", "C100").
+  /// Pas de FK — la borne n'est pas dans notre DB.
+  borneInternalNumber String
+  /// Origine du numero: "factory" (on l'a fabriquee ici) ou "bornes"
+  /// (on l'a retrouvee dans l'app Bornes) ou "unknown" si non resolu.
+  sourceApp           String            @default("unknown")
+  status              RepairOrderStatus @default(DRAFT)
+  /// Diagnostic libre saisi par l'operateur au demarrage.
+  diagnosis           String?
+  /// Ids/nom de l'operateur assigne (set au premier passage IN_PROGRESS).
+  operatorId          String?
+  operatorName        String?
+  notes               String?
+  qualityChecks       Json?
+  startedAt           DateTime?
+  completedAt         DateTime?
+  createdById         String
+  createdByName       String?
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
+
+  components RepairComponent[]
+  events     RepairOrderEvent[]
+
+  @@index([borneInternalNumber])
+  @@index([status])
+  @@index([createdAt])
+  @@map("repair_orders")
+}
+
+/// Un composant retire ou installe pendant une reparation.
+///
+/// Chaque ligne represente une operation atomique. La lecture "avant/apres"
+/// se fait en croisant REMOVED + INSTALLED sur le meme productId.
+///
+/// Quand on cree une ligne, un mouvement Stock est demande a Stock (OUT pour
+/// INSTALLED, IN pour REMOVED avec la condition/atelier correspondants).
+/// L'id du mouvement Stock est stocke pour reconciliation et audit.
+model RepairComponent {
+  id                String                       @id @default(uuid())
+  repairOrderId     String
+  repairOrder       RepairOrder                  @relation(fields: [repairOrderId], references: [id], onDelete: Cascade)
+  action            RepairComponentAction
+  productId         String
+  productReference  String
+  serialNumber      String?
+  quantity          Int                          @default(1)
+  /// Requis quand action = REMOVED. Ignore pour INSTALLED.
+  disposition       RepairComponentDisposition?
+  /// Id du mouvement cree cote Stock. Nul si Stock n'etait pas dispo au
+  /// moment de la creation.
+  stockMovementId   String?
+  createdAt         DateTime                     @default(now())
+
+  @@index([repairOrderId])
+  @@index([productId])
+  @@map("repair_components")
+}
+
+/// Audit log append-only d'un RepairOrder. Meme pattern que
+/// AssemblyOrderEvent — voir ce modele pour la doc detaillee.
+model RepairOrderEvent {
+  id             String       @id @default(uuid())
+  repairOrderId  String
+  repairOrder    RepairOrder  @relation(fields: [repairOrderId], references: [id], onDelete: Cascade)
+  eventType      String
+  payload        Json?
+  actorId        String?
+  actorName      String?
+  createdAt      DateTime     @default(now())
+
+  @@index([repairOrderId, createdAt])
+  @@map("repair_order_events")
 }

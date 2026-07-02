@@ -4,6 +4,7 @@ import assemblyOrderRoutes from './assemblyOrders';
 import producedBorneRoutes from './producedBornes';
 import userRefRoutes from './userRef';
 import dashboardRoutes from './dashboard';
+import repairOrderRoutes from './repairOrders';
 import { authenticate } from '../middleware/auth';
 
 const router = Router();
@@ -21,5 +22,6 @@ router.use('/assembly-orders', assemblyOrderRoutes);
 router.use('/produced-bornes', producedBorneRoutes);
 router.use('/users-ref', userRefRoutes);
 router.use('/dashboard', dashboardRoutes);
+router.use('/repair-orders', repairOrderRoutes);
 
 export default router;
