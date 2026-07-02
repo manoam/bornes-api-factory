@@ -62,6 +62,27 @@ enum RepairComponentDisposition {
   STOCK_USED
 }
 
+/// Etat d'un demontage. Pas de TESTING (rien a tester, on demonte).
+enum DisassemblyStatus {
+  DRAFT
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+/// Ou va la piece qu'on vient de recuperer d'une borne demontee.
+/// STOCK_NEW  = elle est parfaite, remise en stock neuf (rare mais possible
+///              pour des consommables non ouverts)
+/// STOCK_USED = elle est en bon etat, remise en stock occasion
+/// TO_TEST    = SAV, a tester avant de decider
+/// SCRAP      = rebut, on la trace en stock puis on la met a la poubelle
+enum DisassemblyDisposition {
+  STOCK_NEW
+  STOCK_USED
+  TO_TEST
+  SCRAP
+}
+
 /// One ProductionOrder = the decision to build N bornes of a given model.
 /// Doesn't represent any specific borne yet — just the intent. When
 /// validated, it spawns N AssemblyOrders.
@@ -285,4 +306,76 @@ model RepairOrderEvent {
 
   @@index([repairOrderId, createdAt])
   @@map("repair_order_events")
+}
+
+/// Un Disassembly = 1 borne en fin de vie qu'on demonte.
+///
+/// Meme identification que RepairOrder (borneInternalNumber + sourceApp).
+/// A la validation, on publie factory.disassemblies.completed pour que
+/// Bornes archive la borne (statut = demontee, sortie du parc actif).
+///
+/// Difference vs Reparation:
+/// - une seule "colonne" de composants (recuperation, pas d'installation)
+/// - pas de statut TESTING (le test se fait plus tard, en SAV)
+/// - pas de controles qualite
+/// - le motif (reason) est obligatoire au demarrage
+model Disassembly {
+  id                  String            @id @default(uuid())
+  borneInternalNumber String
+  sourceApp           String            @default("unknown")
+  status              DisassemblyStatus @default(DRAFT)
+  /// Motif du demontage (fin de contrat, HS irreparable, cannibalisation...).
+  reason              String?
+  operatorId          String?
+  operatorName        String?
+  notes               String?
+  startedAt           DateTime?
+  completedAt         DateTime?
+  createdById         String
+  createdByName       String?
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
+
+  components DisassemblyComponent[]
+  events     DisassemblyEvent[]
+
+  @@index([borneInternalNumber])
+  @@index([status])
+  @@index([createdAt])
+  @@map("disassemblies")
+}
+
+/// Une piece recuperee d'une borne demontee. Chaque ligne cree un mouvement
+/// Stock IN au moment de sa creation. La condition du mouvement depend de
+/// la disposition (NEW pour STOCK_NEW, USED pour tout le reste).
+model DisassemblyComponent {
+  id               String                 @id @default(uuid())
+  disassemblyId    String
+  disassembly      Disassembly            @relation(fields: [disassemblyId], references: [id], onDelete: Cascade)
+  productId        String
+  productReference String
+  serialNumber     String?
+  quantity         Int                    @default(1)
+  disposition      DisassemblyDisposition
+  stockMovementId  String?
+  createdAt        DateTime               @default(now())
+
+  @@index([disassemblyId])
+  @@index([productId])
+  @@map("disassembly_components")
+}
+
+/// Audit log append-only.
+model DisassemblyEvent {
+  id            String       @id @default(uuid())
+  disassemblyId String
+  disassembly   Disassembly  @relation(fields: [disassemblyId], references: [id], onDelete: Cascade)
+  eventType     String
+  payload       Json?
+  actorId       String?
+  actorName     String?
+  createdAt     DateTime     @default(now())
+
+  @@index([disassemblyId, createdAt])
+  @@map("disassembly_events")
 }
