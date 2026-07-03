@@ -83,6 +83,33 @@ enum DisassemblyDisposition {
   SCRAP
 }
 
+/// Etat d'un reconditionnement. Meme cycle qu'une reparation (avec TESTING)
+/// car la borne repart en service, il faut la tester.
+enum RefurbishmentStatus {
+  DRAFT
+  IN_PROGRESS
+  TESTING
+  COMPLETED
+  CANCELLED
+}
+
+/// Meme semantique que RepairComponentAction — un reconditionnement fait
+/// des retraits ET des installations.
+enum RefurbishmentComponentAction {
+  REMOVED
+  INSTALLED
+}
+
+/// Sur reconditionnement, les pieces retirees sont typiquement gardees dans
+/// l'atelier avec le meme classement que pour un demontage. On reutilise
+/// donc le meme set de dispositions.
+enum RefurbishmentDisposition {
+  STOCK_NEW
+  STOCK_USED
+  TO_TEST
+  SCRAP
+}
+
 /// One ProductionOrder = the decision to build N bornes of a given model.
 /// Doesn't represent any specific borne yet — just the intent. When
 /// validated, it spawns N AssemblyOrders.
@@ -378,4 +405,83 @@ model DisassemblyEvent {
 
   @@index([disassemblyId, createdAt])
   @@map("disassembly_events")
+}
+
+/// Un Refurbishment = 1 borne existante qu'on remet a neuf pour la relouer.
+///
+/// Ex: la borne K001 revient de chez un client apres 3 ans, on la refait
+/// avec composants OK gardes + composants HS remplaces.
+///
+/// Difference vs RepairOrder (les 2 se ressemblent beaucoup):
+/// - Reparation: intervention chez un client, borne reste chez lui
+/// - Reconditionnement: borne revenue au depot, remise prete a re-louer
+///
+/// Difference vs Disassembly:
+/// - Demontage: borne archivee (fin de vie)
+/// - Reconditionnement: borne reintegree au parc dispo
+///
+/// borneInternalNumber inchange (voir Q1 = A). Publie
+/// factory.refurbishments.completed a la validation — Bornes remet la borne
+/// en statut "prete".
+model Refurbishment {
+  id                  String              @id @default(uuid())
+  borneInternalNumber String
+  sourceApp           String              @default("unknown")
+  status              RefurbishmentStatus @default(DRAFT)
+  /// Motif du reconditionnement (fin de contrat, revision periodique, upgrade).
+  reason              String?
+  operatorId          String?
+  operatorName        String?
+  notes               String?
+  qualityChecks       Json?
+  startedAt           DateTime?
+  completedAt         DateTime?
+  createdById         String
+  createdByName       String?
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+
+  components RefurbishmentComponent[]
+  events     RefurbishmentEvent[]
+
+  @@index([borneInternalNumber])
+  @@index([status])
+  @@index([createdAt])
+  @@map("refurbishments")
+}
+
+/// Un composant retire OU installe pendant un reconditionnement. Meme
+/// structure que RepairComponent — la disposition n'est requise que pour
+/// les REMOVED.
+model RefurbishmentComponent {
+  id               String                        @id @default(uuid())
+  refurbishmentId  String
+  refurbishment    Refurbishment                 @relation(fields: [refurbishmentId], references: [id], onDelete: Cascade)
+  action           RefurbishmentComponentAction
+  productId        String
+  productReference String
+  serialNumber     String?
+  quantity         Int                           @default(1)
+  disposition      RefurbishmentDisposition?
+  stockMovementId  String?
+  createdAt        DateTime                      @default(now())
+
+  @@index([refurbishmentId])
+  @@index([productId])
+  @@map("refurbishment_components")
+}
+
+/// Audit log append-only.
+model RefurbishmentEvent {
+  id              String        @id @default(uuid())
+  refurbishmentId String
+  refurbishment   Refurbishment @relation(fields: [refurbishmentId], references: [id], onDelete: Cascade)
+  eventType       String
+  payload         Json?
+  actorId         String?
+  actorName       String?
+  createdAt       DateTime      @default(now())
+
+  @@index([refurbishmentId, createdAt])
+  @@map("refurbishment_events")
 }

@@ -6,6 +6,7 @@ import userRefRoutes from './userRef';
 import dashboardRoutes from './dashboard';
 import repairOrderRoutes from './repairOrders';
 import disassemblyRoutes from './disassemblies';
+import refurbishmentRoutes from './refurbishments';
 import { authenticate } from '../middleware/auth';
 
 const router = Router();
@@ -25,5 +26,6 @@ router.use('/users-ref', userRefRoutes);
 router.use('/dashboard', dashboardRoutes);
 router.use('/repair-orders', repairOrderRoutes);
 router.use('/disassemblies', disassemblyRoutes);
+router.use('/refurbishments', refurbishmentRoutes);
 
 export default router;
