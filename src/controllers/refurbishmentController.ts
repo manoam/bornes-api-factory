@@ -10,6 +10,7 @@ import {
   isConfigured as isBornesConfigured,
   type BorneRow,
 } from '../services/bornesClient';
+import { enrichRowsWithBornes } from '../services/borneEnrich';
 import { publishEvent } from '../services/rabbitmqHttp';
 import { QUALITY_CHECKS, REQUIRED_QUALITY_CHECK_IDS } from '../config/qualityChecks';
 
@@ -112,21 +113,24 @@ export async function list(req: AuthenticatedRequest, res: Response, next: NextF
     };
     for (const s of statsRaw) stats[s.status] = s._count._all;
 
+    const shaped = rows.map((r) => ({
+      id: r.id,
+      borneInternalNumber: r.borneInternalNumber,
+      sourceApp: r.sourceApp,
+      status: r.status,
+      reason: r.reason,
+      operatorName: r.operatorName,
+      createdByName: r.createdByName,
+      startedAt: r.startedAt,
+      completedAt: r.completedAt,
+      createdAt: r.createdAt,
+      componentsCount: r._count.components,
+    }));
+    const enriched = await enrichRowsWithBornes(shaped);
+
     res.json({
       success: true,
-      data: rows.map((r) => ({
-        id: r.id,
-        borneInternalNumber: r.borneInternalNumber,
-        sourceApp: r.sourceApp,
-        status: r.status,
-        reason: r.reason,
-        operatorName: r.operatorName,
-        createdByName: r.createdByName,
-        startedAt: r.startedAt,
-        completedAt: r.completedAt,
-        createdAt: r.createdAt,
-        componentsCount: r._count.components,
-      })),
+      data: enriched,
       stats,
       pagination: { total, limit, offset },
     });
