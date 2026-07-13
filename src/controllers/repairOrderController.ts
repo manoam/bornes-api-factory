@@ -1,6 +1,8 @@
+import fs from 'fs';
 import { Response, NextFunction } from 'express';
 import { z } from 'zod';
 import prisma from '../config/database';
+import { relativeUploadUrl, fullUploadPath } from '../config/uploads';
 import { AppError } from '../middleware/errorHandler';
 import { AuthenticatedRequest } from '../types/auth';
 import { logRepairEvent } from '../services/repairEventLog';
@@ -164,6 +166,7 @@ export async function get(req: AuthenticatedRequest, res: Response, next: NextFu
       where: { id },
       include: {
         components: { orderBy: { createdAt: 'asc' } },
+        attachments: { orderBy: { createdAt: 'desc' } },
       },
     });
     if (!order) throw new AppError('Ordre de reparation introuvable', 404);
@@ -763,6 +766,217 @@ export async function transition(
     if (err instanceof z.ZodError) {
       return next(new AppError(err.errors[0]?.message || 'Donnees invalides', 400));
     }
+    next(err);
+  }
+}
+
+// ---------- CLOSE (V2) ----------
+
+const closeSchema = z.object({
+  report: z.string().min(1, 'Compte-rendu requis'),
+  finalResult: z.enum(['RESOLVED', 'NOT_REPRODUCED', 'BEYOND_REPAIR', 'ESCALATED']),
+});
+
+/**
+ * V2 — POST /repair-orders/:id/close
+ *
+ * Cloture atomique d'une reparation depuis TESTING vers COMPLETED :
+ *   - set report + finalResult + completedAt en une seule ecriture
+ *   - meme guards que transition(COMPLETED) : 6 controles qualite requis
+ *   - meme publish RabbitMQ que transition(COMPLETED)
+ *
+ * Endpoint separe de transition() pour deux raisons :
+ *   1. On force le body a contenir report + finalResult, alors que
+ *      transition() a un body {to,reason?} generique.
+ *   2. La cloture est un evenement metier assez important pour meriter
+ *      son propre logRepairEvent 'CLOSED' distinct du 'STATUS_CHANGED'.
+ */
+export async function close(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+  try {
+    const id = String(req.params.id);
+    const body = closeSchema.parse(req.body);
+    const existing = await prisma.repairOrder.findUnique({
+      where: { id },
+      include: { components: true },
+    });
+    if (!existing) throw new AppError('Ordre de reparation introuvable', 404);
+    if (existing.status !== 'TESTING') {
+      throw new AppError('La cloture n\'est possible qu\'en phase TESTING', 400);
+    }
+    const checks = (existing.qualityChecks as string[] | null) || [];
+    const missing = REQUIRED_QUALITY_CHECK_IDS.filter((cid) => !checks.includes(cid));
+    if (missing.length > 0) {
+      throw new AppError(`${missing.length} controle(s) qualite manquant(s)`, 400);
+    }
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const u = await tx.repairOrder.update({
+        where: { id },
+        data: {
+          status: 'COMPLETED',
+          report: body.report,
+          finalResult: body.finalResult,
+          completedAt: new Date(),
+        },
+        include: { components: true, attachments: true },
+      });
+      await logRepairEvent(tx as any, id, 'STATUS_CHANGED', req.user, {
+        from: 'TESTING',
+        to: 'COMPLETED',
+      });
+      await logRepairEvent(tx as any, id, 'REPORT_UPDATED', req.user);
+      await logRepairEvent(tx as any, id, 'COMPLETED', req.user, {
+        componentsCount: u.components.length,
+        finalResult: u.finalResult,
+      });
+      return u;
+    });
+
+    void publishEvent(
+      'repair_orders',
+      'completed',
+      {
+        id: updated.id,
+        borneInternalNumber: updated.borneInternalNumber,
+        sourceApp: updated.sourceApp,
+        completedAt: updated.completedAt,
+        operator: updated.operatorName,
+        finalResult: updated.finalResult,
+        report: updated.report,
+        components: updated.components.map((c) => ({
+          kind: c.kind,
+          productId: c.productId,
+          productReference: c.productReference,
+          serialNumber: c.serialNumber,
+          quantity: c.quantity,
+          partState: c.partState,
+          comment: c.comment,
+        })),
+      },
+      req.user,
+    );
+
+    res.json({ success: true, data: { order: updated } });
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      return next(new AppError(err.errors[0]?.message || 'Donnees invalides', 400));
+    }
+    next(err);
+  }
+}
+
+// ---------- ATTACHMENTS (V2) ----------
+
+/**
+ * V2 — POST /repair-orders/:id/attachments (multipart/form-data, field "file")
+ *
+ * Le middleware multer (repairAttachmentsMulter) a deja ecrit le fichier
+ * sur disque avant l'entree ici. On enregistre juste la row en DB.
+ * Si l'ecriture DB echoue, on supprime le fichier disque pour ne pas
+ * laisser d'orphelin.
+ */
+export async function uploadAttachment(
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction,
+) {
+  const uploadedPath = (req as any).file?.path as string | undefined;
+  try {
+    const id = String(req.params.id);
+    const file = (req as any).file as
+      | { path: string; originalname: string; mimetype: string; size: number }
+      | undefined;
+    if (!file) throw new AppError('Fichier manquant (champ "file")', 400);
+
+    const existing = await prisma.repairOrder.findUnique({ where: { id } });
+    if (!existing) throw new AppError('Ordre de reparation introuvable', 404);
+    if (existing.status === 'COMPLETED' || existing.status === 'CANCELLED') {
+      throw new AppError('Ordre clos — ajout de piece jointe impossible', 400);
+    }
+
+    const url = relativeUploadUrl(file.path);
+    const attachment = await prisma.$transaction(async (tx) => {
+      const a = await tx.repairAttachment.create({
+        data: {
+          repairOrderId: id,
+          filename: file.originalname,
+          url,
+          mimeType: file.mimetype,
+          sizeBytes: file.size,
+          uploadedById: req.user.id,
+          uploadedByName: req.user.fullName || req.user.username,
+        },
+      });
+      await logRepairEvent(tx as any, id, 'ATTACHMENT_ADDED', req.user, {
+        filename: file.originalname,
+        mimeType: file.mimetype,
+        sizeBytes: file.size,
+        attachmentId: a.id,
+      });
+      return a;
+    });
+
+    res.status(201).json({ success: true, data: attachment });
+  } catch (err) {
+    // Cleanup disque si la row DB n'a pas ete creee.
+    if (uploadedPath) {
+      try {
+        fs.unlinkSync(uploadedPath);
+      } catch {
+        /* ignore */
+      }
+    }
+    next(err);
+  }
+}
+
+/**
+ * V2 — DELETE /repair-orders/:id/attachments/:attachmentId
+ *
+ * Supprime la row DB puis le fichier disque. Si le fichier disque n'existe
+ * pas (deja supprime, migration ratee), on log mais on ne throw pas.
+ */
+export async function deleteAttachment(
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction,
+) {
+  try {
+    const id = String(req.params.id);
+    const attachmentId = String(req.params.attachmentId);
+    const attachment = await prisma.repairAttachment.findUnique({
+      where: { id: attachmentId },
+      include: { repairOrder: { select: { status: true } } },
+    });
+    if (!attachment || attachment.repairOrderId !== id) {
+      throw new AppError('Piece jointe introuvable', 404);
+    }
+    if (
+      attachment.repairOrder.status === 'COMPLETED' ||
+      attachment.repairOrder.status === 'CANCELLED'
+    ) {
+      throw new AppError('Ordre clos — suppression impossible', 400);
+    }
+
+    await prisma.$transaction(async (tx) => {
+      await tx.repairAttachment.delete({ where: { id: attachmentId } });
+      await logRepairEvent(tx as any, id, 'ATTACHMENT_REMOVED', req.user, {
+        filename: attachment.filename,
+        attachmentId,
+      });
+    });
+
+    try {
+      fs.unlinkSync(fullUploadPath(attachment.url));
+    } catch (err) {
+      console.warn(
+        '[repair-orders] Cleanup disque piece jointe echoue:',
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+
+    res.json({ success: true });
+  } catch (err) {
     next(err);
   }
 }
