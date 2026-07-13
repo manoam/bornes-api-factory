@@ -11,12 +11,22 @@ export type RepairEventType =
   | 'STARTED'
   | 'STATUS_CHANGED'
   | 'DIAGNOSIS_UPDATED'
+  | 'DIAGNOSIS_SOURCE_UPDATED'
+  | 'PRIORITY_UPDATED'
+  | 'ON_HOLD'
+  | 'RESUMED'
+  // V2 — composant : lignes d'intervention typees (REPLACED / CHECKED / DIAGNOSED)
+  | 'COMPONENT_ADDED'
+  | 'COMPONENT_REVERTED'
+  // V1 (conservees pour l'historique existant)
   | 'COMPONENT_REMOVED'
   | 'COMPONENT_INSTALLED'
-  | 'COMPONENT_REVERTED'
   | 'NOTES_UPDATED'
+  | 'REPORT_UPDATED'
   | 'QUALITY_CHECKED'
   | 'QUALITY_UNCHECKED'
+  | 'ATTACHMENT_ADDED'
+  | 'ATTACHMENT_REMOVED'
   | 'COMPLETED'
   | 'CANCELLED';
 

@@ -36,30 +36,58 @@ enum AssemblyComponentStatus {
   REMOVED
 }
 
+/// V2 — ajoute ON_HOLD pour une reparation en attente (piece commandee,
+/// attente client, panne intermittente non reproductible pour l'instant).
 enum RepairOrderStatus {
   DRAFT
   IN_PROGRESS
+  ON_HOLD
   TESTING
   COMPLETED
   CANCELLED
 }
 
-/// REMOVED = piece deposee de la borne (mvt Stock IN)
-/// INSTALLED = piece neuve/reconditionnee mise dans la borne (mvt Stock OUT)
-enum RepairComponentAction {
-  REMOVED
-  INSTALLED
+/// V2 — priorite atelier. Sert au tri du backlog.
+enum RepairPriority {
+  NORMAL
+  HIGH
+  URGENT
 }
 
-/// Ce qu'on fait de la piece qu'on vient de retirer.
-/// TO_TEST = on la met en stock avec un flag "a tester" pour le SAV interne
-/// SCRAP   = poubelle (mvt Stock IN puis note interne, la piece n'entre pas
-///           reellement en stock reutilisable)
-/// STOCK_USED = elle est encore bonne, la remettre en stock condition USED
-enum RepairComponentDisposition {
-  TO_TEST
-  SCRAP
-  STOCK_USED
+/// V2 — type d'intervention sur un composant (remplace RepairComponentAction).
+/// REPLACED  = piece remplacee => 2 mouvements Stock (OUT neuf + IN ancien)
+/// CHECKED   = piece controlee sur place, remise en etat => AUCUN mouvement
+/// DIAGNOSED = piece en cours de diagnostic, decision differee => AUCUN mouvement
+enum RepairInterventionKind {
+  REPLACED
+  CHECKED
+  DIAGNOSED
+}
+
+/// V2 — etat intrinseque de la piece apres intervention (remplace
+/// RepairComponentDisposition). Set pour toutes les lignes, pas seulement
+/// pour les retraits.
+///   OK        = piece validee, fonctionnelle (remise en stock USED si REPLACED)
+///   DEFECTIVE = HS confirme, rebut
+///   TO_CHECK  = suspicion, controle ulterieur necessaire
+///   SUSPECT   = comportement anormal, peut lacher sous stress
+enum RepairPartState {
+  OK
+  DEFECTIVE
+  TO_CHECK
+  SUSPECT
+}
+
+/// V2 — resultat final saisi a la cloture.
+///   RESOLVED       = panne corrigee, borne repart
+///   NOT_REPRODUCED = panne signalee mais non reproductible en atelier
+///   BEYOND_REPAIR  = borne HS, a retirer du parc (declenchera souvent un demontage)
+///   ESCALATED      = remonte fournisseur / R&D / SAV externe
+enum RepairFinalResult {
+  RESOLVED
+  NOT_REPRODUCED
+  BEYOND_REPAIR
+  ESCALATED
 }
 
 /// Etat d'un demontage. Pas de TESTING (rien a tester, on demonte).
@@ -267,13 +295,25 @@ model RepairOrder {
   /// (on l'a retrouvee dans l'app Bornes) ou "unknown" si non resolu.
   sourceApp           String            @default("unknown")
   status              RepairOrderStatus @default(DRAFT)
+  /// V2 — priorite atelier (backlog).
+  priority            RepairPriority    @default(NORMAL)
   /// Diagnostic libre saisi par l'operateur au demarrage.
   diagnosis           String?
+  /// V2 — d'ou vient le diagnostic ("Cree manuellement", "Remonte du parc"...).
+  /// Affiche dans le bandeau "Probleme signale". Null = valeur par defaut
+  /// deduite de sourceApp cote UI.
+  diagnosisSource     String?
   /// Ids/nom de l'operateur assigne (set au premier passage IN_PROGRESS).
   operatorId          String?
   operatorName        String?
   notes               String?
   qualityChecks       Json?
+  /// V2 — motif de mise en attente (obligatoire pour transition ON_HOLD).
+  onHoldReason        String?
+  /// V2 — compte-rendu long saisi lors de la cloture.
+  report              String?
+  /// V2 — resultat final de la cloture (set en meme temps que report).
+  finalResult         RepairFinalResult?
   startedAt           DateTime?
   completedAt         DateTime?
   createdById         String
@@ -281,42 +321,70 @@ model RepairOrder {
   createdAt           DateTime          @default(now())
   updatedAt           DateTime          @updatedAt
 
-  components RepairComponent[]
-  events     RepairOrderEvent[]
+  components  RepairComponent[]
+  events      RepairOrderEvent[]
+  attachments RepairAttachment[]
 
   @@index([borneInternalNumber])
   @@index([status])
+  @@index([priority])
   @@index([createdAt])
   @@map("repair_orders")
 }
 
-/// Un composant retire ou installe pendant une reparation.
+/// V2 — Une ligne de la declaration d'intervention d'une reparation.
 ///
-/// Chaque ligne represente une operation atomique. La lecture "avant/apres"
-/// se fait en croisant REMOVED + INSTALLED sur le meme productId.
+/// Contrairement a la V1 (une ligne = un mouvement REMOVED ou INSTALLED),
+/// une ligne V2 = un couple (piece, action). L'action `kind` decide si on
+/// declenche des mouvements Stock:
+///   - REPLACED  => 2 mouvements Stock (OUT de la piece neuve + IN de l'ancienne)
+///   - CHECKED   => aucun mouvement (piece resta sur la borne)
+///   - DIAGNOSED => aucun mouvement (piece resta sur la borne, decision differee)
 ///
-/// Quand on cree une ligne, un mouvement Stock est demande a Stock (OUT pour
-/// INSTALLED, IN pour REMOVED avec la condition/atelier correspondants).
-/// L'id du mouvement Stock est stocke pour reconciliation et audit.
+/// L'etat `partState` decrit l'etat intrinseque de la piece apres
+/// intervention. Il est set pour toutes les lignes, meme CHECKED/DIAGNOSED,
+/// pour qu'on puisse suivre l'evolution d'une piece dans le temps.
+///
+/// stockMovementIds contient les ids Stock (0, 1 ou 2) pour reconciliation.
 model RepairComponent {
-  id                String                       @id @default(uuid())
+  id                String                 @id @default(uuid())
   repairOrderId     String
-  repairOrder       RepairOrder                  @relation(fields: [repairOrderId], references: [id], onDelete: Cascade)
-  action            RepairComponentAction
+  repairOrder       RepairOrder            @relation(fields: [repairOrderId], references: [id], onDelete: Cascade)
+  kind              RepairInterventionKind
   productId         String
   productReference  String
   serialNumber      String?
-  quantity          Int                          @default(1)
-  /// Requis quand action = REMOVED. Ignore pour INSTALLED.
-  disposition       RepairComponentDisposition?
-  /// Id du mouvement cree cote Stock. Nul si Stock n'etait pas dispo au
-  /// moment de la creation.
-  stockMovementId   String?
-  createdAt         DateTime                     @default(now())
+  quantity          Int                    @default(1)
+  partState         RepairPartState        @default(OK)
+  /// Commentaire libre saisi par l'operateur sur cette ligne.
+  comment           String?
+  /// Ids Stock des mouvements crees pour cette ligne (JSON array de strings).
+  /// Vide pour CHECKED/DIAGNOSED. 1 ou 2 ids pour REPLACED selon disponibilite Stock.
+  stockMovementIds  Json?
+  createdAt         DateTime               @default(now())
 
   @@index([repairOrderId])
   @@index([productId])
   @@map("repair_components")
+}
+
+/// V2 — Piece jointe attachee a une reparation (photo, PDF facture, etc.).
+/// Stockage disque local dans uploads/repairs/. Une reparation peut avoir
+/// plusieurs pieces jointes (rien ne limite).
+model RepairAttachment {
+  id              String       @id @default(uuid())
+  repairOrderId   String
+  repairOrder     RepairOrder  @relation(fields: [repairOrderId], references: [id], onDelete: Cascade)
+  filename        String
+  url             String
+  mimeType        String
+  sizeBytes       Int
+  uploadedById    String
+  uploadedByName  String?
+  createdAt       DateTime     @default(now())
+
+  @@index([repairOrderId])
+  @@map("repair_attachments")
 }
 
 /// Audit log append-only d'un RepairOrder. Meme pattern que

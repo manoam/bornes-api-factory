@@ -17,8 +17,11 @@ import { AuthenticatedRequest } from '../types/auth';
 
 type Kind =
   | 'ASSEMBLED'
-  | 'REPAIR_REMOVED'
-  | 'REPAIR_INSTALLED'
+  // V2 Repair : lignes d'intervention typees.
+  | 'REPAIR_REPLACED'
+  | 'REPAIR_CHECKED'
+  | 'REPAIR_DIAGNOSED'
+  // Recond garde encore la shape V1 (REMOVED/INSTALLED) — pas migre.
   | 'REFURB_REMOVED'
   | 'REFURB_INSTALLED'
   | 'DISASSEMBLED';
@@ -30,6 +33,10 @@ interface TimelineEvent {
   orderId: string;
   orderStatus: string | null;
   operatorName: string | null;
+  /**
+   * Pour Repair V2 : partState (OK / DEFECTIVE / TO_CHECK / SUSPECT).
+   * Pour Refurb V1 : disposition (TO_TEST / SCRAP / STOCK_USED / STOCK_NEW).
+   */
   disposition: string | null;
   quantity: number;
   productReference: string;
@@ -105,14 +112,21 @@ export async function getTimeline(
 
     for (const c of repairs) {
       const ro = c.repairOrder;
+      const kindV2: Kind =
+        c.kind === 'REPLACED'
+          ? 'REPAIR_REPLACED'
+          : c.kind === 'CHECKED'
+            ? 'REPAIR_CHECKED'
+            : 'REPAIR_DIAGNOSED';
       events.push({
-        kind: c.action === 'REMOVED' ? 'REPAIR_REMOVED' : 'REPAIR_INSTALLED',
+        kind: kindV2,
         at: c.createdAt.toISOString(),
         borneInternalNumber: ro.borneInternalNumber,
         orderId: ro.id,
         orderStatus: ro.status,
         operatorName: ro.operatorName || null,
-        disposition: c.disposition,
+        // V2 : on remonte partState dans le champ generique.
+        disposition: c.partState,
         quantity: c.quantity,
         productReference: c.productReference,
         productId: c.productId,
@@ -162,21 +176,24 @@ export async function getTimeline(
     const last = events[0] || null;
 
     // On cherche la borne actuelle : le dernier evenement d'installation
-    // (ASSEMBLED, REPAIR_INSTALLED, REFURB_INSTALLED) dont l'ordre n'a
-    // pas ete annule, en supposant qu'aucun retrait posterieur n'a eu
-    // lieu sur la meme borne.
+    // ou de presence attestee dont l'ordre n'a pas ete annule, tant qu'un
+    // retrait posterieur n'a pas eu lieu.
+    //
+    // V2 Repair : REPLACED = pose de la nouvelle piece (implicitement retrait
+    //   de l'ancienne du meme productId, mais on ne trace qu'une ligne).
+    //   CHECKED / DIAGNOSED = la piece etait presente sur la borne au moment
+    //   du chantier (elle n'a pas bouge).
     let currentBorne: string | null = null;
     for (const e of events) {
-      const isInstall =
+      const isPresent =
         e.kind === 'ASSEMBLED' ||
-        e.kind === 'REPAIR_INSTALLED' ||
+        e.kind === 'REPAIR_REPLACED' ||
+        e.kind === 'REPAIR_CHECKED' ||
+        e.kind === 'REPAIR_DIAGNOSED' ||
         e.kind === 'REFURB_INSTALLED';
-      const isRemove =
-        e.kind === 'REPAIR_REMOVED' ||
-        e.kind === 'REFURB_REMOVED' ||
-        e.kind === 'DISASSEMBLED';
-      if (isRemove) break; // dernier retrait connu → piece n'est plus sur la borne
-      if (isInstall && e.orderStatus !== 'CANCELLED') {
+      const isRemove = e.kind === 'REFURB_REMOVED' || e.kind === 'DISASSEMBLED';
+      if (isRemove) break;
+      if (isPresent && e.orderStatus !== 'CANCELLED') {
         currentBorne = e.borneInternalNumber;
         break;
       }

@@ -32,31 +32,38 @@ import { QUALITY_CHECKS, REQUIRED_QUALITY_CHECK_IDS } from '../config/qualityChe
 const createSchema = z.object({
   borneInternalNumber: z.string().min(1, 'Numero de borne requis'),
   diagnosis: z.string().optional().nullable(),
+  priority: z.enum(['NORMAL', 'HIGH', 'URGENT']).optional(),
 });
 
 const updateSchema = z.object({
   diagnosis: z.string().optional().nullable(),
+  diagnosisSource: z.string().optional().nullable(),
+  priority: z.enum(['NORMAL', 'HIGH', 'URGENT']).optional(),
   notes: z.string().optional().nullable(),
   qualityChecks: z.array(z.string()).optional(),
+  report: z.string().optional().nullable(),
 });
 
+// V2 — nouvelle shape d'une ligne d'intervention.
 const addComponentSchema = z.object({
-  action: z.enum(['REMOVED', 'INSTALLED']),
+  kind: z.enum(['REPLACED', 'CHECKED', 'DIAGNOSED']),
   productId: z.string().min(1),
   productReference: z.string().min(1),
   serialNumber: z.string().optional().nullable(),
   quantity: z.number().int().positive().default(1),
-  disposition: z.enum(['TO_TEST', 'SCRAP', 'STOCK_USED']).optional(),
+  partState: z.enum(['OK', 'DEFECTIVE', 'TO_CHECK', 'SUSPECT']).default('OK'),
+  comment: z.string().optional().nullable(),
 });
 
 const transitionSchema = z.object({
-  to: z.enum(['IN_PROGRESS', 'TESTING', 'COMPLETED', 'CANCELLED']),
+  to: z.enum(['IN_PROGRESS', 'ON_HOLD', 'TESTING', 'COMPLETED', 'CANCELLED']),
   reason: z.string().optional(),
+  onHoldReason: z.string().optional(),
 });
 
 // ---------- LIST ----------
 
-const STATUS_VALUES = ['DRAFT', 'IN_PROGRESS', 'TESTING', 'COMPLETED', 'CANCELLED'] as const;
+const STATUS_VALUES = ['DRAFT', 'IN_PROGRESS', 'ON_HOLD', 'TESTING', 'COMPLETED', 'CANCELLED'] as const;
 
 /**
  * GET /repair-orders
@@ -114,6 +121,7 @@ export async function list(req: AuthenticatedRequest, res: Response, next: NextF
     const stats: Record<string, number> = {
       DRAFT: 0,
       IN_PROGRESS: 0,
+      ON_HOLD: 0,
       TESTING: 0,
       COMPLETED: 0,
       CANCELLED: 0,
@@ -125,6 +133,7 @@ export async function list(req: AuthenticatedRequest, res: Response, next: NextF
       borneInternalNumber: r.borneInternalNumber,
       sourceApp: r.sourceApp,
       status: r.status,
+      priority: r.priority,
       diagnosis: r.diagnosis,
       operatorName: r.operatorName,
       startedAt: r.startedAt,
@@ -203,6 +212,10 @@ export async function create(req: AuthenticatedRequest, res: Response, next: Nex
           borneInternalNumber: internal,
           sourceApp,
           diagnosis: body.diagnosis || null,
+          // V2 — source par defaut deduite de sourceApp (visible dans le
+          // bandeau "Probleme signale").
+          diagnosisSource: sourceApp === 'bornes' ? 'Remonte du parc' : 'Cree manuellement',
+          priority: body.priority || 'NORMAL',
           createdById: req.user.id,
           createdByName: req.user.fullName || req.user.username,
         },
@@ -240,8 +253,11 @@ export async function update(req: AuthenticatedRequest, res: Response, next: Nex
 
     const data: any = {};
     if (body.diagnosis !== undefined) data.diagnosis = body.diagnosis;
+    if (body.diagnosisSource !== undefined) data.diagnosisSource = body.diagnosisSource;
+    if (body.priority !== undefined) data.priority = body.priority;
     if (body.notes !== undefined) data.notes = body.notes;
     if (body.qualityChecks !== undefined) data.qualityChecks = body.qualityChecks;
+    if (body.report !== undefined) data.report = body.report;
 
     const order = await prisma.$transaction(async (tx) => {
       const updated = await tx.repairOrder.update({
@@ -254,6 +270,18 @@ export async function update(req: AuthenticatedRequest, res: Response, next: Nex
       }
       if (body.diagnosis !== undefined && body.diagnosis !== existing.diagnosis) {
         await logRepairEvent(tx as any, id, 'DIAGNOSIS_UPDATED', req.user);
+      }
+      if (body.diagnosisSource !== undefined && body.diagnosisSource !== existing.diagnosisSource) {
+        await logRepairEvent(tx as any, id, 'DIAGNOSIS_SOURCE_UPDATED', req.user);
+      }
+      if (body.priority !== undefined && body.priority !== existing.priority) {
+        await logRepairEvent(tx as any, id, 'PRIORITY_UPDATED', req.user, {
+          from: existing.priority,
+          to: body.priority,
+        });
+      }
+      if (body.report !== undefined && body.report !== existing.report) {
+        await logRepairEvent(tx as any, id, 'REPORT_UPDATED', req.user);
       }
       if (body.qualityChecks !== undefined) {
         const before = new Set<string>((existing.qualityChecks as string[] | null) || []);
@@ -300,6 +328,23 @@ export async function update(req: AuthenticatedRequest, res: Response, next: Nex
  * (avec stockMovementId=null) et on log un warning. L'operateur peut
  * refaire tourner la sync plus tard.
  */
+/**
+ * V2 — POST /repair-orders/:id/components
+ *
+ * Ajoute une ligne de declaration d'intervention. Selon `kind`:
+ *   - REPLACED  : cree 2 mouvements Stock (OUT piece neuve depuis atelier
+ *                 + IN piece retiree vers atelier). La condition IN
+ *                 depend de partState :
+ *                    OK        => USED
+ *                    DEFECTIVE => USED (mais commentaire "rebut")
+ *                    TO_CHECK  => USED (commentaire "a tester")
+ *                    SUSPECT   => USED (commentaire "suspect")
+ *   - CHECKED   : aucun mouvement Stock (piece resta sur la borne).
+ *   - DIAGNOSED : aucun mouvement Stock (decision differee).
+ *
+ * Si Stock est injoignable, on cree la ligne quand meme avec
+ * stockMovementIds vide et un warning au log.
+ */
 export async function addComponent(
   req: AuthenticatedRequest,
   res: Response,
@@ -316,80 +361,74 @@ export async function addComponent(
     if (existing.status === 'DRAFT') {
       throw new AppError('Demarrer la reparation avant d\'ajouter des composants', 400);
     }
-    if (body.action === 'REMOVED' && !body.disposition) {
-      throw new AppError('Disposition requise pour un composant retire', 400);
-    }
 
-    const stock = stockClientFor(req.user.rawToken);
-    let stockMovementId: string | null = null;
-    try {
-      const atelier = await stock.getAtelierSite();
-      if (body.action === 'INSTALLED') {
-        const movement = await stock.createMovement({
+    const stockMovementIds: string[] = [];
+    if (body.kind === 'REPLACED') {
+      const stock = stockClientFor(req.user.rawToken);
+      try {
+        const atelier = await stock.getAtelierSite();
+        const partSuffix =
+          body.partState === 'DEFECTIVE'
+            ? 'piece HS rebut'
+            : body.partState === 'TO_CHECK'
+              ? 'piece a tester'
+              : body.partState === 'SUSPECT'
+                ? 'piece suspecte'
+                : 'piece OK reinjection';
+        // OUT : nouvelle piece depuis atelier
+        const out = await stock.createMovement({
           productId: body.productId,
           type: 'OUT',
           quantity: body.quantity,
           condition: 'NEW',
           movementDate: new Date().toISOString(),
           sourceSiteId: atelier.id,
-          comment: `Reparation ${existing.borneInternalNumber} — installation`,
+          comment: `Reparation ${existing.borneInternalNumber} — installation neuve`,
           ...(body.serialNumber ? { serialNumbers: [body.serialNumber] } : {}),
         });
-        stockMovementId = movement.id;
-      } else {
-        // REMOVED : la piece rentre au SAV atelier
-        const comment =
-          body.disposition === 'SCRAP'
-            ? `Reparation ${existing.borneInternalNumber} — piece HS rebut`
-            : body.disposition === 'STOCK_USED'
-              ? `Reparation ${existing.borneInternalNumber} — piece OK reinjection`
-              : `Reparation ${existing.borneInternalNumber} — piece a tester`;
-        const movement = await stock.createMovement({
+        stockMovementIds.push(out.id);
+        // IN : ancienne piece retiree vers atelier
+        const inMv = await stock.createMovement({
           productId: body.productId,
           type: 'IN',
           quantity: body.quantity,
           condition: 'USED',
           movementDate: new Date().toISOString(),
           targetSiteId: atelier.id,
-          comment,
-          ...(body.serialNumber ? { serialNumbers: [body.serialNumber] } : {}),
+          comment: `Reparation ${existing.borneInternalNumber} — ${partSuffix}`,
         });
-        stockMovementId = movement.id;
+        stockMovementIds.push(inMv.id);
+      } catch (err) {
+        console.warn(
+          '[repair-orders] Stock createMovement failed for REPLACED, keeping local record:',
+          err instanceof Error ? err.message : String(err),
+        );
       }
-    } catch (err) {
-      // Stock injoignable : on cree quand meme la ligne, log dans l'audit.
-      console.warn(
-        '[repair-orders] Stock createMovement failed, keeping local record:',
-        err instanceof Error ? err.message : String(err),
-      );
     }
 
     const component = await prisma.$transaction(async (tx) => {
       const c = await tx.repairComponent.create({
         data: {
           repairOrderId: id,
-          action: body.action,
+          kind: body.kind,
           productId: body.productId,
           productReference: body.productReference,
           serialNumber: body.serialNumber || null,
           quantity: body.quantity,
-          disposition: body.action === 'REMOVED' ? body.disposition || null : null,
-          stockMovementId,
+          partState: body.partState,
+          comment: body.comment || null,
+          stockMovementIds: stockMovementIds.length > 0 ? stockMovementIds : undefined,
         },
       });
-      await logRepairEvent(
-        tx as any,
-        id,
-        body.action === 'REMOVED' ? 'COMPONENT_REMOVED' : 'COMPONENT_INSTALLED',
-        req.user,
-        {
-          productRef: body.productReference,
-          serialNumber: body.serialNumber || null,
-          quantity: body.quantity,
-          disposition: body.disposition || null,
-          stockMovementId,
-        },
-      );
+      await logRepairEvent(tx as any, id, 'COMPONENT_ADDED', req.user, {
+        kind: body.kind,
+        productRef: body.productReference,
+        serialNumber: body.serialNumber || null,
+        quantity: body.quantity,
+        partState: body.partState,
+        comment: body.comment || null,
+        stockMovementIds,
+      });
       return c;
     });
 
@@ -432,8 +471,9 @@ export async function removeComponent(
       await logRepairEvent(tx as any, id, 'COMPONENT_REVERTED', req.user, {
         productRef: component.productReference,
         serialNumber: component.serialNumber,
-        action: component.action,
-        stockMovementId: component.stockMovementId,
+        kind: component.kind,
+        partState: component.partState,
+        stockMovementIds: (component.stockMovementIds as string[] | null) || [],
       });
     });
     res.json({ success: true });
@@ -592,7 +632,8 @@ export async function transition(
 
     const validTransitions: Record<string, string[]> = {
       DRAFT: ['IN_PROGRESS', 'CANCELLED'],
-      IN_PROGRESS: ['TESTING', 'CANCELLED'],
+      IN_PROGRESS: ['ON_HOLD', 'TESTING', 'CANCELLED'],
+      ON_HOLD: ['IN_PROGRESS', 'CANCELLED'],
       TESTING: ['IN_PROGRESS', 'COMPLETED', 'CANCELLED'],
     };
     if (!validTransitions[existing.status]?.includes(body.to)) {
@@ -600,6 +641,9 @@ export async function transition(
     }
 
     // Guards
+    if (body.to === 'ON_HOLD' && !body.onHoldReason?.trim()) {
+      throw new AppError('Motif de mise en attente requis', 400);
+    }
     if (body.to === 'TESTING' && existing.components.length === 0) {
       throw new AppError('Aucun composant enregistre — la reparation est vide', 400);
     }
@@ -619,6 +663,13 @@ export async function transition(
         data.operatorId = req.user.id;
         data.operatorName = req.user.fullName || req.user.username;
       }
+      if (body.to === 'ON_HOLD') {
+        data.onHoldReason = body.onHoldReason?.trim() || null;
+      }
+      if (body.to === 'IN_PROGRESS' && existing.status === 'ON_HOLD') {
+        // Reprise depuis pause : on nettoie le motif.
+        data.onHoldReason = null;
+      }
       if (body.to === 'COMPLETED') {
         data.completedAt = new Date();
       }
@@ -634,9 +685,18 @@ export async function transition(
       if (body.to === 'IN_PROGRESS' && !existing.startedAt) {
         await logRepairEvent(tx as any, id, 'STARTED', req.user);
       }
+      if (body.to === 'ON_HOLD') {
+        await logRepairEvent(tx as any, id, 'ON_HOLD', req.user, {
+          reason: body.onHoldReason || null,
+        });
+      }
+      if (body.to === 'IN_PROGRESS' && existing.status === 'ON_HOLD') {
+        await logRepairEvent(tx as any, id, 'RESUMED', req.user);
+      }
       if (body.to === 'COMPLETED') {
         await logRepairEvent(tx as any, id, 'COMPLETED', req.user, {
           componentsCount: u.components.length,
+          finalResult: u.finalResult,
         });
       }
       if (body.to === 'CANCELLED') {
@@ -647,7 +707,19 @@ export async function transition(
       return u;
     });
 
-    // Publish sur RabbitMQ pour la validation ou l'annulation.
+    // V2 — Publish sur RabbitMQ pour on_hold, completed, cancelled.
+    if (body.to === 'ON_HOLD') {
+      void publishEvent(
+        'repair_orders',
+        'on_hold',
+        {
+          id: updated.id,
+          borneInternalNumber: updated.borneInternalNumber,
+          reason: body.onHoldReason || null,
+        },
+        req.user,
+      );
+    }
     if (body.to === 'COMPLETED') {
       void publishEvent(
         'repair_orders',
@@ -658,13 +730,16 @@ export async function transition(
           sourceApp: updated.sourceApp,
           completedAt: updated.completedAt,
           operator: updated.operatorName,
+          finalResult: updated.finalResult,
+          report: updated.report,
           components: updated.components.map((c) => ({
-            action: c.action,
+            kind: c.kind,
             productId: c.productId,
             productReference: c.productReference,
             serialNumber: c.serialNumber,
             quantity: c.quantity,
-            disposition: c.disposition,
+            partState: c.partState,
+            comment: c.comment,
           })),
         },
         req.user,
