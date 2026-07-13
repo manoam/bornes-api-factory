@@ -679,7 +679,7 @@ export async function transition(
       const u = await tx.repairOrder.update({
         where: { id },
         data,
-        include: { components: true },
+        include: { components: true, attachments: true },
       });
       await logRepairEvent(tx as any, id, 'STATUS_CHANGED', req.user, {
         from: existing.status,
@@ -710,7 +710,7 @@ export async function transition(
       return u;
     });
 
-    // V2 — Publish sur RabbitMQ pour on_hold, completed, cancelled.
+    // V2 — Publish sur RabbitMQ pour on_hold, resumed, completed, cancelled.
     if (body.to === 'ON_HOLD') {
       void publishEvent(
         'repair_orders',
@@ -719,6 +719,20 @@ export async function transition(
           id: updated.id,
           borneInternalNumber: updated.borneInternalNumber,
           reason: body.onHoldReason || null,
+        },
+        req.user,
+      );
+    }
+    if (body.to === 'IN_PROGRESS' && existing.status === 'ON_HOLD') {
+      // Signale aux autres apps qu'une reparation reprend apres une pause.
+      // Utile pour reactiver une notification / un dashboard cote Bornes.
+      void publishEvent(
+        'repair_orders',
+        'resumed',
+        {
+          id: updated.id,
+          borneInternalNumber: updated.borneInternalNumber,
+          previousReason: existing.onHoldReason || null,
         },
         req.user,
       );
@@ -743,6 +757,13 @@ export async function transition(
             quantity: c.quantity,
             partState: c.partState,
             comment: c.comment,
+          })),
+          attachments: (updated.attachments || []).map((a) => ({
+            id: a.id,
+            filename: a.filename,
+            url: a.url,
+            mimeType: a.mimeType,
+            sizeBytes: a.sizeBytes,
           })),
         },
         req.user,
