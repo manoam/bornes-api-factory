@@ -1,9 +1,12 @@
 import { Router } from 'express';
 import * as ctrl from '../controllers/assemblyOrderController';
+import * as productionCtrl from '../controllers/productionOrderController';
 
 const router = Router();
 
+router.get('/available-models', productionCtrl.availableModels as any);
 router.get('/', ctrl.list as any);
+router.post('/batch', ctrl.batchCreate as any);
 router.get('/:id', ctrl.get as any);
 router.get('/:id/checklist', ctrl.checklist as any);
 router.get('/:id/history', ctrl.history as any);

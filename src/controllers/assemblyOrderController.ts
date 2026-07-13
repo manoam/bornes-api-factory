@@ -28,6 +28,81 @@ const transitionSchema = z.object({
   reason: z.string().optional(),
 });
 
+// ---------- BATCH CREATE (raccourci UI "Bornes a creer") ----------
+
+const batchCreateSchema = z.object({
+  model: z.string().min(1, 'Modele requis'),
+  quantity: z.number().int().positive('Quantite doit etre > 0').max(100, 'Max 100 par commande'),
+  reason: z.string().optional().nullable(),
+  targetDate: z.string().datetime().optional().nullable(),
+  priority: z.enum(['LOW', 'NORMAL', 'HIGH']).optional(),
+});
+
+/**
+ * POST /assembly-orders/batch
+ *
+ * Raccourci UI qui remplace le flow historique en 2 etapes
+ * (POST /production-orders puis POST /:id/plan). L'operateur choisit une
+ * gamme + une quantite et Factory cree en une seule transaction :
+ *   1. un ProductionOrder (statut PLANNED direct, pas de DRAFT intermediaire)
+ *   2. N AssemblyOrder rattaches, tous en statut DRAFT
+ *
+ * Le ProductionOrder reste en DB pour grouper les assemblages et porter
+ * le motif/target date, mais il n'est plus expose dans la sidebar. Chaque
+ * AssemblyOrder apparait dans "Bornes a creer".
+ */
+export async function batchCreate(
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction,
+) {
+  try {
+    const body = batchCreateSchema.parse(req.body);
+
+    const result = await prisma.$transaction(async (tx) => {
+      const production = await tx.productionOrder.create({
+        data: {
+          model: body.model,
+          quantity: body.quantity,
+          priority: body.priority || 'NORMAL',
+          reason: body.reason || null,
+          targetDate: body.targetDate ? new Date(body.targetDate) : null,
+          status: 'PLANNED',
+          createdById: req.user.id,
+          createdByName: req.user.fullName || req.user.username,
+        },
+      });
+
+      await tx.assemblyOrder.createMany({
+        data: Array.from({ length: body.quantity }, () => ({
+          productionOrderId: production.id,
+        })),
+      });
+
+      return tx.productionOrder.findUnique({
+        where: { id: production.id },
+        include: {
+          assemblyOrders: {
+            select: {
+              id: true,
+              status: true,
+              internalNumber: true,
+              createdAt: true,
+            },
+          },
+        },
+      });
+    });
+
+    res.status(201).json({ success: true, data: result });
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      return next(new AppError(err.errors[0]?.message || 'Donnees invalides', 400));
+    }
+    next(err);
+  }
+}
+
 // ---------- LIST ----------
 
 const STATUS_VALUES = ['DRAFT', 'IN_PROGRESS', 'TESTING', 'COMPLETED', 'CANCELLED'] as const;
