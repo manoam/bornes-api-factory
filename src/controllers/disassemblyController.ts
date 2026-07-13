@@ -35,11 +35,13 @@ import { publishEvent } from '../services/rabbitmqHttp';
 const createSchema = z.object({
   borneInternalNumber: z.string().min(1, 'Numero de borne requis'),
   reason: z.string().optional().nullable(),
+  priority: z.enum(['NORMAL', 'HIGH', 'URGENT']).optional(),
 });
 
 const updateSchema = z.object({
   reason: z.string().optional().nullable(),
   notes: z.string().optional().nullable(),
+  priority: z.enum(['NORMAL', 'HIGH', 'URGENT']).optional(),
 });
 
 const addComponentSchema = z.object({
@@ -119,6 +121,7 @@ export async function list(req: AuthenticatedRequest, res: Response, next: NextF
       borneInternalNumber: r.borneInternalNumber,
       sourceApp: r.sourceApp,
       status: r.status,
+      priority: r.priority,
       reason: r.reason,
       operatorName: r.operatorName,
       createdByName: r.createdByName,
@@ -185,6 +188,7 @@ export async function create(req: AuthenticatedRequest, res: Response, next: Nex
           borneInternalNumber: internal,
           sourceApp,
           reason: body.reason || null,
+          priority: body.priority || 'NORMAL',
           createdById: req.user.id,
           createdByName: req.user.fullName || req.user.username,
         },
@@ -223,6 +227,7 @@ export async function update(req: AuthenticatedRequest, res: Response, next: Nex
     const data: any = {};
     if (body.reason !== undefined) data.reason = body.reason;
     if (body.notes !== undefined) data.notes = body.notes;
+    if (body.priority !== undefined) data.priority = body.priority;
 
     const dis = await prisma.$transaction(async (tx) => {
       const updated = await tx.disassembly.update({
@@ -232,6 +237,12 @@ export async function update(req: AuthenticatedRequest, res: Response, next: Nex
       });
       if (body.reason !== undefined && body.reason !== existing.reason) {
         await logDisassemblyEvent(tx as any, id, 'REASON_UPDATED', req.user);
+      }
+      if (body.priority !== undefined && body.priority !== existing.priority) {
+        await logDisassemblyEvent(tx as any, id, 'PRIORITY_UPDATED', req.user, {
+          from: existing.priority,
+          to: body.priority,
+        });
       }
       if (body.notes !== undefined && body.notes !== existing.notes) {
         await logDisassemblyEvent(tx as any, id, 'NOTES_UPDATED', req.user);

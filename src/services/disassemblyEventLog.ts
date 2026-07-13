@@ -11,6 +11,7 @@ export type DisassemblyEventType =
   | 'STARTED'
   | 'STATUS_CHANGED'
   | 'REASON_UPDATED'
+  | 'PRIORITY_UPDATED'
   | 'COMPONENT_RECOVERED'
   | 'COMPONENT_REVERTED'
   | 'NOTES_UPDATED'

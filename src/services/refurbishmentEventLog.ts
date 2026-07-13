@@ -11,6 +11,7 @@ export type RefurbishmentEventType =
   | 'STARTED'
   | 'STATUS_CHANGED'
   | 'REASON_UPDATED'
+  | 'PRIORITY_UPDATED'
   | 'COMPONENT_REMOVED'
   | 'COMPONENT_INSTALLED'
   | 'COMPONENT_REVERTED'

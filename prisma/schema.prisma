@@ -419,6 +419,9 @@ model Disassembly {
   borneInternalNumber String
   sourceApp           String            @default("unknown")
   status              DisassemblyStatus @default(DRAFT)
+  /// V2 — priorite atelier (backlog). Utilise le meme enum que
+  /// RepairOrder pour rester coherent metier.
+  priority            RepairPriority    @default(NORMAL)
   /// Motif du demontage (fin de contrat, HS irreparable, cannibalisation...).
   reason              String?
   operatorId          String?
@@ -436,6 +439,7 @@ model Disassembly {
 
   @@index([borneInternalNumber])
   @@index([status])
+  @@index([priority])
   @@index([createdAt])
   @@map("disassemblies")
 }
@@ -496,6 +500,8 @@ model Refurbishment {
   borneInternalNumber String
   sourceApp           String              @default("unknown")
   status              RefurbishmentStatus @default(DRAFT)
+  /// V2 — priorite atelier (backlog). Meme enum que RepairOrder.
+  priority            RepairPriority      @default(NORMAL)
   /// Motif du reconditionnement (fin de contrat, revision periodique, upgrade).
   reason              String?
   operatorId          String?
@@ -514,6 +520,7 @@ model Refurbishment {
 
   @@index([borneInternalNumber])
   @@index([status])
+  @@index([priority])
   @@index([createdAt])
   @@map("refurbishments")
 }
