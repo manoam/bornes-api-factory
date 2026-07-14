@@ -24,16 +24,30 @@ export interface StockProduct {
   hasSerialNumber: boolean;
 }
 
+/**
+ * Type de piece (orthogonal a PartCategory qui decrit la localisation).
+ * Utilise cote Factory pour grouper la checklist d'assemblage.
+ */
+export type StockPartType = 'EQUIPMENT' | 'PROTECTION' | 'HARDWARE';
+
 export interface StockAssemblyTypeItem {
   id: string;
   productId: string;
   quantity: number;
-  product: { reference: string; description: string | null };
   /**
-   * Categorie de la piece dans cette BOM (ex "Equipement", "Protection",
-   * "Visserie"). Null si l'admin Stock n'a pas encore tague le produit.
-   * Cote UI Factory, on cache les lignes sans categorie — l'admin doit
-   * completer côté Stock pour qu'elles apparaissent.
+   * Le product embarque partType (nature de la piece : Equipement / Protection
+   * / Visserie). Null si l'admin Stock n'a pas encore tague le produit —
+   * dans ce cas Factory cache la ligne dans la checklist.
+   */
+  product: {
+    reference: string;
+    description: string | null;
+    partType: StockPartType | null;
+  };
+  /**
+   * partCategory reste dispo (localisation : Tete/Pied/Socle) mais n'est plus
+   * utilise cote Factory pour grouper la checklist. On garde le champ pour
+   * eviter de casser d'autres usages potentiels.
    */
   partCategory: { id: string; name: string } | null;
 }
