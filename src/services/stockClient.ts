@@ -29,6 +29,13 @@ export interface StockAssemblyTypeItem {
   productId: string;
   quantity: number;
   product: { reference: string; description: string | null };
+  /**
+   * Categorie de la piece dans cette BOM (ex "Equipement", "Protection",
+   * "Visserie"). Null si l'admin Stock n'a pas encore tague le produit.
+   * Cote UI Factory, on cache les lignes sans categorie — l'admin doit
+   * completer côté Stock pour qu'elles apparaissent.
+   */
+  partCategory: { id: string; name: string } | null;
 }
 
 export interface StockAssemblyType {

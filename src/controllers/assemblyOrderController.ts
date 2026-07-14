@@ -445,6 +445,10 @@ export async function checklist(req: AuthenticatedRequest, res: Response, next: 
         productId: it.productId,
         productReference: it.product.reference,
         productDescription: it.product.description,
+        // V2 — categorie de la piece (Equipement / Protection / Visserie / autre).
+        // L'UI groupe la checklist par cette valeur; les lignes sans category
+        // sont cachees (decision explicite, voir docs).
+        category: it.partCategory?.name ?? null,
         hasSerialNumber: meta?.hasSerialNumber ?? false,
         imageUrl: meta?.imageUrl ?? null,
         requiredQty: it.quantity,
