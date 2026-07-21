@@ -18,6 +18,9 @@ const updateSchema = z.object({
 const addComponentSchema = z.object({
   productId: z.string().min(1),
   productReference: z.string().min(1),
+  /** Description lisible du produit — non stockee en base, sert uniquement
+   *  a enrichir le payload de l'event historique. */
+  productDescription: z.string().optional().nullable(),
   serialNumber: z.string().optional().nullable(),
   quantity: z.number().int().positive().default(1),
 });
@@ -25,6 +28,7 @@ const addComponentSchema = z.object({
 const upsertCategoryComponentSchema = z.object({
   productId: z.string().min(1),
   productReference: z.string().min(1),
+  productDescription: z.string().optional().nullable(),
   serialNumber: z.string().optional().nullable(),
   quantity: z.number().int().positive().default(1),
 });
@@ -349,6 +353,7 @@ export async function addComponent(
       });
       await logAssemblyEvent(tx as any, existing.id, 'COMPONENT_INSTALLED', req.user, {
         productRef: body.productReference,
+        productDescription: body.productDescription || null,
         serialNumber: body.serialNumber || null,
         quantity: body.quantity,
       });
@@ -386,10 +391,21 @@ export async function removeComponent(
       throw new AppError('Ordre clos — retrait impossible', 400);
     }
 
+    // Recup la derniere description connue via les events precedents.
+    const lastKnown = await prisma.assemblyOrderEvent.findFirst({
+      where: {
+        assemblyOrderId: id,
+        eventType: { in: ['COMPONENT_INSTALLED', 'COMPONENT_UPDATED'] },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    const lastDesc = (lastKnown?.payload as any)?.productDescription ?? null;
+
     await prisma.$transaction(async (tx) => {
       await tx.assemblyComponent.delete({ where: { id: component.id } });
       await logAssemblyEvent(tx as any, id, 'COMPONENT_REMOVED', req.user, {
         productRef: component.productReference,
+        productDescription: lastDesc,
         serialNumber: component.serialNumber,
         quantity: component.quantity,
       });
@@ -451,6 +467,7 @@ export async function upsertCategoryComponent(
         });
         await logAssemblyEvent(tx as any, id, 'COMPONENT_UPDATED', req.user, {
           productRef: body.productReference,
+          productDescription: body.productDescription || null,
           serialNumber: body.serialNumber || null,
           quantity: body.quantity,
           productCategoryId,
@@ -472,6 +489,7 @@ export async function upsertCategoryComponent(
       });
       await logAssemblyEvent(tx as any, id, 'COMPONENT_INSTALLED', req.user, {
         productRef: body.productReference,
+        productDescription: body.productDescription || null,
         serialNumber: body.serialNumber || null,
         quantity: body.quantity,
         productCategoryId,
@@ -519,10 +537,22 @@ export async function removeCategoryComponent(
     });
     if (!existing) return res.json({ success: true }); // idempotent
 
+    // Recup la derniere description connue via les events precedents
+    // (INSTALLED/UPDATED) pour l'inclure dans le REMOVED.
+    const lastKnown = await prisma.assemblyOrderEvent.findFirst({
+      where: {
+        assemblyOrderId: id,
+        eventType: { in: ['COMPONENT_INSTALLED', 'COMPONENT_UPDATED'] },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    const lastDesc = (lastKnown?.payload as any)?.productDescription ?? null;
+
     await prisma.$transaction(async (tx) => {
       await tx.assemblyComponent.delete({ where: { id: existing.id } });
       await logAssemblyEvent(tx as any, id, 'COMPONENT_REMOVED', req.user, {
         productRef: existing.productReference,
+        productDescription: lastDesc,
         serialNumber: existing.serialNumber,
         quantity: existing.quantity,
         productCategoryId,
