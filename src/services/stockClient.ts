@@ -103,6 +103,7 @@ export interface StockProductLite {
   brand: string | null;
   model: string | null;
   variant: string | null;
+  imageUrl: string | null;
   hasSerialNumber: boolean;
   productCategoryId: string | null;
 }
