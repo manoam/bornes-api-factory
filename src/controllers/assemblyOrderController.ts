@@ -445,7 +445,7 @@ export async function checklist(req: AuthenticatedRequest, res: Response, next: 
         productId: it.productId,
         productReference: it.product.reference,
         productDescription: it.product.description,
-        // Type de piece (Equipement / Protection / Visserie), orthogonal a la
+        // Type de piece (Equipement / Protection / Accessoire), orthogonal a la
         // localisation (partCategory : Tete/Pied). L'UI Factory groupe la
         // checklist par cette valeur; les lignes sans partType sont cachees
         // (decision explicite — voir docs).

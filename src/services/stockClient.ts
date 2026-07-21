@@ -28,7 +28,7 @@ export interface StockProduct {
  * Type de piece (orthogonal a PartCategory qui decrit la localisation).
  * Utilise cote Factory pour grouper la checklist d'assemblage.
  */
-export type StockPartType = 'EQUIPMENT' | 'PROTECTION' | 'HARDWARE';
+export type StockPartType = 'EQUIPMENT' | 'PROTECTION' | 'ACCESSORY';
 
 export interface StockAssemblyTypeItem {
   id: string;
@@ -36,7 +36,7 @@ export interface StockAssemblyTypeItem {
   quantity: number;
   /**
    * Le product embarque partType (nature de la piece : Equipement / Protection
-   * / Visserie). Null si l'admin Stock n'a pas encore tague le produit —
+   * / Accessoire). Null si l'admin Stock n'a pas encore tague le produit —
    * dans ce cas Factory cache la ligne dans la checklist.
    */
   product: {
