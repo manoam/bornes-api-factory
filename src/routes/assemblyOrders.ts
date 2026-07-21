@@ -15,4 +15,9 @@ router.post('/:id/transition', ctrl.transition as any);
 router.post('/:id/components', ctrl.addComponent as any);
 router.delete('/:id/components/:componentId', ctrl.removeComponent as any);
 
+// Upsert / delete par ProductCategory (mode "matrice" de la page assemblage).
+// Au plus 1 composant par (assemblyOrder, productCategory).
+router.put('/:id/categories/:productCategoryId', ctrl.upsertCategoryComponent as any);
+router.delete('/:id/categories/:productCategoryId', ctrl.removeCategoryComponent as any);
+
 export default router;

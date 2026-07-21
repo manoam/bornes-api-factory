@@ -263,6 +263,11 @@ model AssemblyComponent {
   assemblyOrder     AssemblyOrder           @relation(fields: [assemblyOrderId], references: [id], onDelete: Cascade)
   productId         String
   productReference  String
+  /// ID de la ProductCategory (miroir cote Stock). Sert de cle logique :
+  /// un assemblage a AU PLUS un composant par categorie (unique
+  /// (assemblyOrderId, productCategoryId)). Choix produit=null pour une
+  /// categorie => aucune ligne en base.
+  productCategoryId String?
   /// Serial number for tracked products. Null for quantitative items.
   serialNumber      String?
   quantity          Int                     @default(1)
@@ -271,6 +276,7 @@ model AssemblyComponent {
   removedAt         DateTime?
   createdAt         DateTime                @default(now())
 
+  @@unique([assemblyOrderId, productCategoryId])
   @@index([assemblyOrderId])
   @@index([productId])
   @@map("assembly_components")

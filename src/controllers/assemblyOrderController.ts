@@ -22,6 +22,13 @@ const addComponentSchema = z.object({
   quantity: z.number().int().positive().default(1),
 });
 
+const upsertCategoryComponentSchema = z.object({
+  productId: z.string().min(1),
+  productReference: z.string().min(1),
+  serialNumber: z.string().optional().nullable(),
+  quantity: z.number().int().positive().default(1),
+});
+
 const transitionSchema = z.object({
   to: z.enum(['IN_PROGRESS', 'TESTING', 'COMPLETED', 'CANCELLED']),
   internalNumber: z.string().optional(),
@@ -393,6 +400,140 @@ export async function removeComponent(
   }
 }
 
+/**
+ * PUT /assembly-orders/:id/categories/:productCategoryId
+ *
+ * Upsert d'UNE ligne composant par catégorie : si une ligne existe déjà
+ * pour cette catégorie sur cet assemblage, elle est remplacée (produit,
+ * SN, quantité). Sinon création.
+ *
+ * Utilisé par le panel "matrice de catégories" côté client :
+ * l'opérateur voit toutes les catégories du partType du tab actif et
+ * choisit AU PLUS un produit par catégorie.
+ */
+export async function upsertCategoryComponent(
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction,
+) {
+  try {
+    const id = String(req.params.id);
+    const productCategoryId = String(req.params.productCategoryId);
+    const body = upsertCategoryComponentSchema.parse(req.body);
+
+    const order = await prisma.assemblyOrder.findUnique({ where: { id } });
+    if (!order) throw new AppError("Ordre d'assemblage introuvable", 404);
+    if (order.status === 'COMPLETED' || order.status === 'CANCELLED') {
+      throw new AppError('Ordre clos — modification impossible', 400);
+    }
+
+    const component = await prisma.$transaction(async (tx) => {
+      const existing = await tx.assemblyComponent.findUnique({
+        where: {
+          assemblyOrderId_productCategoryId: {
+            assemblyOrderId: id,
+            productCategoryId,
+          },
+        },
+      });
+
+      if (existing) {
+        const updated = await tx.assemblyComponent.update({
+          where: { id: existing.id },
+          data: {
+            productId: body.productId,
+            productReference: body.productReference,
+            serialNumber: body.serialNumber || null,
+            quantity: body.quantity,
+            status: 'INSTALLED',
+            installedAt: existing.installedAt ?? new Date(),
+          },
+        });
+        await logAssemblyEvent(tx as any, id, 'COMPONENT_UPDATED', req.user, {
+          productRef: body.productReference,
+          serialNumber: body.serialNumber || null,
+          quantity: body.quantity,
+          productCategoryId,
+        });
+        return updated;
+      }
+
+      const created = await tx.assemblyComponent.create({
+        data: {
+          assemblyOrderId: id,
+          productCategoryId,
+          productId: body.productId,
+          productReference: body.productReference,
+          serialNumber: body.serialNumber || null,
+          quantity: body.quantity,
+          status: 'INSTALLED',
+          installedAt: new Date(),
+        },
+      });
+      await logAssemblyEvent(tx as any, id, 'COMPONENT_INSTALLED', req.user, {
+        productRef: body.productReference,
+        serialNumber: body.serialNumber || null,
+        quantity: body.quantity,
+        productCategoryId,
+      });
+      return created;
+    });
+
+    res.json({ success: true, data: component });
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      return next(new AppError(err.errors[0]?.message || 'Données invalides', 400));
+    }
+    next(err);
+  }
+}
+
+/**
+ * DELETE /assembly-orders/:id/categories/:productCategoryId
+ *
+ * Retire le composant pour cette catégorie. Utilisé quand l'opérateur
+ * repasse la dropdown Produit à "aucun choix" côté UI.
+ */
+export async function removeCategoryComponent(
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction,
+) {
+  try {
+    const id = String(req.params.id);
+    const productCategoryId = String(req.params.productCategoryId);
+
+    const order = await prisma.assemblyOrder.findUnique({ where: { id } });
+    if (!order) throw new AppError("Ordre d'assemblage introuvable", 404);
+    if (order.status === 'COMPLETED' || order.status === 'CANCELLED') {
+      throw new AppError('Ordre clos — modification impossible', 400);
+    }
+
+    const existing = await prisma.assemblyComponent.findUnique({
+      where: {
+        assemblyOrderId_productCategoryId: {
+          assemblyOrderId: id,
+          productCategoryId,
+        },
+      },
+    });
+    if (!existing) return res.json({ success: true }); // idempotent
+
+    await prisma.$transaction(async (tx) => {
+      await tx.assemblyComponent.delete({ where: { id: existing.id } });
+      await logAssemblyEvent(tx as any, id, 'COMPONENT_REMOVED', req.user, {
+        productRef: existing.productReference,
+        serialNumber: existing.serialNumber,
+        quantity: existing.quantity,
+        productCategoryId,
+      });
+    });
+    res.json({ success: true });
+  } catch (err) {
+    next(err);
+  }
+}
+
 // ---------- Checklist ----------
 
 /**
@@ -477,6 +618,19 @@ export async function checklist(req: AuthenticatedRequest, res: Response, next: 
         installedAt: c.installedAt,
       }));
 
+    // Selections par ProductCategory (mode "matrice" : 1 ligne = 1 categorie).
+    // Renvoie uniquement les composants qui ont un productCategoryId non null.
+    const categorySelections = order.components
+      .filter((c) => !!c.productCategoryId)
+      .map((c) => ({
+        componentId: c.id,
+        productCategoryId: c.productCategoryId as string,
+        productId: c.productId,
+        productReference: c.productReference,
+        serialNumber: c.serialNumber,
+        quantity: c.quantity,
+      }));
+
     const requiredLines = lines.filter((l) => !l.complete).length;
     res.json({
       success: true,
@@ -484,6 +638,7 @@ export async function checklist(req: AuthenticatedRequest, res: Response, next: 
         model: order.productionOrder.model,
         lines,
         extras,
+        categorySelections,
         requiredCount: at.items.length,
         completeCount: at.items.length - requiredLines,
         qualityChecks: QUALITY_CHECKS,
