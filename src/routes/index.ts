@@ -9,6 +9,7 @@ import disassemblyRoutes from './disassemblies';
 import refurbishmentRoutes from './refurbishments';
 import componentTimelineRoutes from './componentTimeline';
 import borneTimelineRoutes from './borneTimeline';
+import stockCatalogRoutes from './stockCatalog';
 import { authenticate } from '../middleware/auth';
 
 const router = Router();
@@ -31,5 +32,6 @@ router.use('/disassemblies', disassemblyRoutes);
 router.use('/refurbishments', refurbishmentRoutes);
 router.use('/components', componentTimelineRoutes);
 router.use('/bornes', borneTimelineRoutes);
+router.use('/catalog', stockCatalogRoutes);
 
 export default router;

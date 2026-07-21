@@ -73,6 +73,40 @@ export interface StockSite {
   isActive: boolean;
 }
 
+export interface StockProductCategory {
+  id: string;
+  name: string;
+  codeReference: string;
+  partType: StockPartType | null;
+  isActive: boolean;
+  displayOrder: number;
+}
+
+export interface StockSerialItem {
+  id: string;
+  serialNumber: string | null;
+  status: 'IN_STOCK' | 'OUT' | 'IN_REPAIR' | 'SCRAPPED' | 'LOST';
+  condition: 'NEW' | 'USED';
+  siteId: string | null;
+  borneNumber: string | null;
+}
+
+/**
+ * Product enrichi avec les infos nécessaires au panel d'ajout Factory.
+ * Reprend StockProduct + les champs de composition (name, brand, model).
+ */
+export interface StockProductLite {
+  id: string;
+  reference: string;
+  name: string | null;
+  description: string | null;
+  brand: string | null;
+  model: string | null;
+  variant: string | null;
+  hasSerialNumber: boolean;
+  productCategoryId: string | null;
+}
+
 function makeClient(token: string): AxiosInstance {
   return axios.create({
     baseURL: STOCK_API_URL,
@@ -169,6 +203,46 @@ export class StockClient {
    * Used when an assembly_order is completed: Factory issues OUT movements
    * for every installed component.
    */
+  /**
+   * Liste les catégories principales de produit (Imprimante, PC, Écran,
+   * ...), filtrable par partType (Équipement / Protection / Accessoire).
+   * Utilisé par le panel d'ajout de composants Factory.
+   */
+  getProductCategories(opts?: {
+    partType?: StockPartType;
+    activeOnly?: boolean;
+  }): Promise<StockProductCategory[]> {
+    const params: string[] = [];
+    if (opts?.partType) params.push(`partType=${opts.partType}`);
+    if (opts?.activeOnly) params.push('isActive=true');
+    const qs = params.length ? `?${params.join('&')}` : '';
+    return wrap(makeClient(this.token).get(`/product-categories${qs}`));
+  }
+
+  /**
+   * Liste les produits filtrés par catégorie. Le résultat est extrait de
+   * la réponse paginée standard (`{data: [...], pagination: {...}}`).
+   */
+  async getProductsByCategory(productCategoryId: string): Promise<StockProductLite[]> {
+    // Response shape: { success, data: [...], pagination }. wrap() renvoie data.
+    const res = await makeClient(this.token).get(
+      `/products?productCategoryId=${productCategoryId}&limit=500&sortBy=reference`,
+    );
+    return (res.data?.data ?? []) as StockProductLite[];
+  }
+
+  /**
+   * Liste les numéros de série d'un produit, filtrables par statut
+   * (`IN_STOCK` pour ne montrer que les SN dispos à l'installation).
+   */
+  getSerialItems(
+    productId: string,
+    opts?: { status?: StockSerialItem['status'] },
+  ): Promise<StockSerialItem[]> {
+    const qs = opts?.status ? `?status=${opts.status}` : '';
+    return wrap(makeClient(this.token).get(`/products/${productId}/serial-items${qs}`));
+  }
+
   createMovement(payload: {
     productId: string;
     type: 'IN' | 'OUT' | 'TRANSFER';
