@@ -855,6 +855,72 @@ export async function transition(
       return u;
     });
 
+    // A la validation, on cree les mouvements Stock pour tous les composants
+    // qui n'en ont pas encore (mode matrice : upsertCategoryReplacement ne
+    // cree pas les mouvements live, on batch a la fin).
+    //
+    // Regle simple V1 :
+    //   REMOVED   -> IN atelier, condition=USED (tout en occasion)
+    //   INSTALLED -> OUT atelier, condition=NEW
+    //
+    // On IGNORE les SN dans le mouvement pour eviter les collisions
+    // unique(productId, serialNumber) cote Stock. Le suivi SN precis
+    // sera fait dans une iteration future via un endpoint dedie.
+    if (body.to === 'COMPLETED') {
+      const stock = stockClientFor(req.user.rawToken);
+      let atelierId: string | null = null;
+      try {
+        const atelier = await stock.getAtelierSite();
+        atelierId = atelier.id;
+      } catch (err) {
+        console.warn(
+          '[refurbishments] getAtelierSite failed, skipping stock movements:',
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+      if (atelierId) {
+        for (const c of updated.components) {
+          if (c.stockMovementId) continue; // deja fait via addComponent
+          try {
+            let movement: { id: string } | null = null;
+            if (c.action === 'INSTALLED') {
+              movement = await stock.createMovement({
+                productId: c.productId,
+                type: 'OUT',
+                quantity: c.quantity,
+                condition: 'NEW',
+                movementDate: new Date().toISOString(),
+                sourceSiteId: atelierId,
+                comment: `Reconditionnement ${updated.borneInternalNumber} — installation`,
+              });
+            } else {
+              // REMOVED : retour atelier en occasion
+              movement = await stock.createMovement({
+                productId: c.productId,
+                type: 'IN',
+                quantity: c.quantity,
+                condition: 'USED',
+                movementDate: new Date().toISOString(),
+                targetSiteId: atelierId,
+                comment: `Reconditionnement ${updated.borneInternalNumber} — retour occasion`,
+              });
+            }
+            if (movement) {
+              await prisma.refurbishmentComponent.update({
+                where: { id: c.id },
+                data: { stockMovementId: movement.id },
+              });
+            }
+          } catch (err) {
+            console.warn(
+              `[refurbishments] createMovement failed for component ${c.id}:`,
+              err instanceof Error ? err.message : String(err),
+            );
+          }
+        }
+      }
+    }
+
     // A la validation, Bornes remet la borne en statut "prete a louer".
     if (body.to === 'COMPLETED') {
       void publishEvent(
