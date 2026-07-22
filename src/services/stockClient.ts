@@ -22,6 +22,10 @@ export interface StockProduct {
   description: string | null;
   imageUrl: string | null;
   hasSerialNumber: boolean;
+  /** Categorie principale (Imprimante / PC / ...) — sert au mapping
+   *  card cote reconditionnement. Null si le produit n'est pas encore
+   *  tage cote Stock. */
+  productCategoryId: string | null;
 }
 
 /**

@@ -714,12 +714,39 @@ export async function suggestions(
       removedKeys.add(`${c.productId}::${c.serialNumber || ''}`);
     }
 
+    // Enrichit chaque composant d'origine avec productCategoryId +
+    // productDescription (via Stock) pour le mapping cote UI. Le fetch
+    // est N+1 pour l'instant — a batcher plus tard si perf devient un
+    // souci (Stock devra exposer GET /products?ids=).
+    const stock = stockClientFor(req.user.rawToken);
+    const uniqIds = Array.from(new Set(assembly.components.map((c) => c.productId)));
+    const productsById = new Map<
+      string,
+      { productCategoryId: string | null; description: string | null }
+    >();
+    await Promise.all(
+      uniqIds.map(async (pid) => {
+        try {
+          const p = await stock.getProduct(pid);
+          productsById.set(pid, {
+            productCategoryId: p.productCategoryId ?? null,
+            description: p.description ?? null,
+          });
+        } catch {
+          productsById.set(pid, { productCategoryId: null, description: null });
+        }
+      }),
+    );
+
     const items = assembly.components.map((c) => {
       const key = `${c.productId}::${c.serialNumber || ''}`;
       const alreadyRemoved = removedKeys.has(key);
+      const meta = productsById.get(c.productId);
       return {
         productId: c.productId,
         productReference: c.productReference,
+        productDescription: meta?.description ?? null,
+        productCategoryId: meta?.productCategoryId ?? null,
         serialNumber: c.serialNumber,
         quantity: c.quantity,
         alreadyRemoved,
