@@ -15,4 +15,8 @@ router.post('/:id/transition', ctrl.transition as any);
 router.post('/:id/components', ctrl.addComponent as any);
 router.delete('/:id/components/:componentId', ctrl.removeComponent as any);
 
+// Mode "remplacement par categorie" : upsert atomique de 0/1/2 lignes
+// (REMOVED + INSTALLED) pour un slot de ProductCategory donne.
+router.put('/:id/categories/:productCategoryId', ctrl.upsertCategoryReplacement as any);
+
 export default router;

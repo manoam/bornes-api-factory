@@ -541,12 +541,18 @@ model RefurbishmentComponent {
   action           RefurbishmentComponentAction
   productId        String
   productReference String
+  /// ID de la ProductCategory (miroir cote Stock). Sert pour le mode
+  /// "remplacement par categorie" cote UI : on garde AU PLUS 1 REMOVED
+  /// + 1 INSTALLED par (refurb, category, action). Null pour les
+  /// entrees creees hors du mode matrice (compat retro).
+  productCategoryId String?
   serialNumber     String?
   quantity         Int                           @default(1)
   disposition      RefurbishmentDisposition?
   stockMovementId  String?
   createdAt        DateTime                      @default(now())
 
+  @@unique([refurbishmentId, productCategoryId, action])
   @@index([refurbishmentId])
   @@index([productId])
   @@map("refurbishment_components")

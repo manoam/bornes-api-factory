@@ -45,9 +45,41 @@ const addComponentSchema = z.object({
   action: z.enum(['REMOVED', 'INSTALLED']),
   productId: z.string().min(1),
   productReference: z.string().min(1),
+  productDescription: z.string().optional().nullable(),
   serialNumber: z.string().optional().nullable(),
   quantity: z.number().int().positive().default(1),
   disposition: z.enum(['STOCK_NEW', 'STOCK_USED', 'TO_TEST', 'SCRAP']).optional(),
+});
+
+/**
+ * Body du "remplacement par categorie". Les 2 blocs sont OPTIONNELS :
+ * - `removed` seul  = on retire l'ancien sans installer de nouveau
+ * - `installed` seul = on installe sans retirer d'ancien (ex : ajout net)
+ * - les 2         = remplacement (l'ancien va en STOCK_USED/SCRAP, le nouveau installe)
+ * Si les 2 sont absents -> delete des lignes existantes pour cette categorie.
+ */
+const upsertCategoryReplacementSchema = z.object({
+  removed: z
+    .object({
+      productId: z.string().min(1),
+      productReference: z.string().min(1),
+      productDescription: z.string().optional().nullable(),
+      serialNumber: z.string().optional().nullable(),
+      quantity: z.number().int().positive().default(1),
+      disposition: z.enum(['STOCK_NEW', 'STOCK_USED', 'TO_TEST', 'SCRAP']).default('STOCK_USED'),
+    })
+    .optional()
+    .nullable(),
+  installed: z
+    .object({
+      productId: z.string().min(1),
+      productReference: z.string().min(1),
+      productDescription: z.string().optional().nullable(),
+      serialNumber: z.string().optional().nullable(),
+      quantity: z.number().int().positive().default(1),
+    })
+    .optional()
+    .nullable(),
 });
 
 const transitionSchema = z.object({
@@ -425,6 +457,142 @@ export async function removeComponent(
     });
     res.json({ success: true });
   } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * PUT /refurbishments/:id/categories/:productCategoryId
+ *
+ * Mode "remplacement par categorie" : upsert atomique de 0, 1 ou 2 lignes
+ * (REMOVED + INSTALLED) pour une categorie donnee.
+ *
+ * Body: { removed?: {...}, installed?: {...} }
+ *  - removed seul     -> retrait sans installation (l'ancien s'en va)
+ *  - installed seul   -> installation sans retrait (ajout net)
+ *  - les 2            -> remplacement complet
+ *  - aucun            -> supprime les lignes existantes pour cette categorie
+ *
+ * NB : ne cree PAS de mouvements Stock (contrairement a addComponent).
+ * L'idee est que les mouvements sont crees a la validation COMPLETED
+ * (comme pour l'assemblage). A revoir si tu veux tracer live.
+ */
+export async function upsertCategoryReplacement(
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction,
+) {
+  try {
+    const id = String(req.params.id);
+    const productCategoryId = String(req.params.productCategoryId);
+    const body = upsertCategoryReplacementSchema.parse(req.body);
+
+    const refurb = await prisma.refurbishment.findUnique({ where: { id } });
+    if (!refurb) throw new AppError('Reconditionnement introuvable', 404);
+    if (refurb.status === 'COMPLETED' || refurb.status === 'CANCELLED') {
+      throw new AppError('Reconditionnement clos — modification impossible', 400);
+    }
+
+    await prisma.$transaction(async (tx) => {
+      // === REMOVED ===
+      const existingRemoved = await tx.refurbishmentComponent.findFirst({
+        where: { refurbishmentId: id, productCategoryId, action: 'REMOVED' },
+      });
+      if (body.removed) {
+        if (existingRemoved) {
+          await tx.refurbishmentComponent.update({
+            where: { id: existingRemoved.id },
+            data: {
+              productId: body.removed.productId,
+              productReference: body.removed.productReference,
+              serialNumber: body.removed.serialNumber || null,
+              quantity: body.removed.quantity,
+              disposition: body.removed.disposition,
+            },
+          });
+        } else {
+          await tx.refurbishmentComponent.create({
+            data: {
+              refurbishmentId: id,
+              productCategoryId,
+              action: 'REMOVED',
+              productId: body.removed.productId,
+              productReference: body.removed.productReference,
+              serialNumber: body.removed.serialNumber || null,
+              quantity: body.removed.quantity,
+              disposition: body.removed.disposition,
+            },
+          });
+        }
+        await logRefurbishmentEvent(tx as any, id, 'COMPONENT_REMOVED', req.user, {
+          productRef: body.removed.productReference,
+          productDescription: body.removed.productDescription || null,
+          serialNumber: body.removed.serialNumber || null,
+          quantity: body.removed.quantity,
+          disposition: body.removed.disposition,
+          productCategoryId,
+        });
+      } else if (existingRemoved) {
+        await tx.refurbishmentComponent.delete({ where: { id: existingRemoved.id } });
+        await logRefurbishmentEvent(tx as any, id, 'COMPONENT_REVERTED', req.user, {
+          productRef: existingRemoved.productReference,
+          serialNumber: existingRemoved.serialNumber,
+          action: 'REMOVED',
+          productCategoryId,
+        });
+      }
+
+      // === INSTALLED ===
+      const existingInstalled = await tx.refurbishmentComponent.findFirst({
+        where: { refurbishmentId: id, productCategoryId, action: 'INSTALLED' },
+      });
+      if (body.installed) {
+        if (existingInstalled) {
+          await tx.refurbishmentComponent.update({
+            where: { id: existingInstalled.id },
+            data: {
+              productId: body.installed.productId,
+              productReference: body.installed.productReference,
+              serialNumber: body.installed.serialNumber || null,
+              quantity: body.installed.quantity,
+            },
+          });
+        } else {
+          await tx.refurbishmentComponent.create({
+            data: {
+              refurbishmentId: id,
+              productCategoryId,
+              action: 'INSTALLED',
+              productId: body.installed.productId,
+              productReference: body.installed.productReference,
+              serialNumber: body.installed.serialNumber || null,
+              quantity: body.installed.quantity,
+            },
+          });
+        }
+        await logRefurbishmentEvent(tx as any, id, 'COMPONENT_INSTALLED', req.user, {
+          productRef: body.installed.productReference,
+          productDescription: body.installed.productDescription || null,
+          serialNumber: body.installed.serialNumber || null,
+          quantity: body.installed.quantity,
+          productCategoryId,
+        });
+      } else if (existingInstalled) {
+        await tx.refurbishmentComponent.delete({ where: { id: existingInstalled.id } });
+        await logRefurbishmentEvent(tx as any, id, 'COMPONENT_REVERTED', req.user, {
+          productRef: existingInstalled.productReference,
+          serialNumber: existingInstalled.serialNumber,
+          action: 'INSTALLED',
+          productCategoryId,
+        });
+      }
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      return next(new AppError(err.errors[0]?.message || 'Donnees invalides', 400));
+    }
     next(err);
   }
 }
