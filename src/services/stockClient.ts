@@ -257,7 +257,10 @@ export class StockClient {
     sourceSiteId?: string;
     targetSiteId?: string;
     comment?: string;
+    /** Pour IN : liste de SN a creer (fill + padding null si moins que qty). */
     serialNumbers?: string[];
+    /** Pour OUT/TRANSFER : liste d'UUID de SN existants a sortir (length === quantity). */
+    serialItemIds?: string[];
   }): Promise<{ id: string }> {
     return wrap(makeClient(this.token).post(`/movements`, payload));
   }

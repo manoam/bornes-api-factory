@@ -884,17 +884,52 @@ export async function transition(
           try {
             let movement: { id: string } | null = null;
             if (c.action === 'INSTALLED') {
-              movement = await stock.createMovement({
-                productId: c.productId,
-                type: 'OUT',
-                quantity: c.quantity,
-                condition: 'NEW',
-                movementDate: new Date().toISOString(),
-                sourceSiteId: atelierId,
-                comment: `Reconditionnement ${updated.borneInternalNumber} — installation`,
-              });
+              // OUT depuis atelier. Si SN-trace, on doit resoudre le SN
+              // string -> serialItemId. Si pas de SN saisi, on skip.
+              const meta = await stock.getProduct(c.productId).catch(() => null);
+              const isSerialTracked = !!meta?.hasSerialNumber;
+              if (isSerialTracked) {
+                if (!c.serialNumber || !c.serialNumber.trim()) {
+                  console.warn(
+                    `[refurbishments] SKIP INSTALLED OUT produit ${c.productId} : SN manquant sur composant ${c.id}`,
+                  );
+                  continue;
+                }
+                const serialItems = await stock.getSerialItems(c.productId, {
+                  status: 'IN_STOCK',
+                });
+                const found = serialItems.find((s) => s.serialNumber === c.serialNumber);
+                if (!found) {
+                  console.warn(
+                    `[refurbishments] SN "${c.serialNumber}" introuvable cote Stock pour ${c.productId}`,
+                  );
+                  continue;
+                }
+                movement = await stock.createMovement({
+                  productId: c.productId,
+                  type: 'OUT',
+                  quantity: 1,
+                  condition: 'NEW',
+                  movementDate: new Date().toISOString(),
+                  sourceSiteId: atelierId,
+                  comment: `Reconditionnement ${updated.borneInternalNumber} — installation`,
+                  serialItemIds: [found.id],
+                });
+              } else {
+                movement = await stock.createMovement({
+                  productId: c.productId,
+                  type: 'OUT',
+                  quantity: c.quantity,
+                  condition: 'NEW',
+                  movementDate: new Date().toISOString(),
+                  sourceSiteId: atelierId,
+                  comment: `Reconditionnement ${updated.borneInternalNumber} — installation`,
+                });
+              }
             } else {
-              // REMOVED : retour atelier en occasion
+              // REMOVED : retour atelier en occasion. IN accepte
+              // serialNumbers (creation) — safe meme si SN existe deja
+              // (Stock geree la contrainte, si collision on log).
               movement = await stock.createMovement({
                 productId: c.productId,
                 type: 'IN',

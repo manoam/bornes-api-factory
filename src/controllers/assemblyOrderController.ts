@@ -801,19 +801,73 @@ export async function transition(
         grouped.set(c.productId, g);
       }
 
-      // 2. Fire the OUT movements. If any fails, we bubble the error and
-      //    DO NOT mark the assembly as completed — operator can retry.
+      // 2. Fire the OUT movements. Pour chaque groupe :
+      //    - Si le produit n'est PAS SN-trace : OUT quantity=g.quantity
+      //    - Si le produit EST SN-trace : on ne compte que les composants
+      //      qui ONT un SN renseigne. Le nombre de SN = quantity envoyee.
+      //      Les composants sans SN sont SKIPPES (log warning). On resout
+      //      chaque SN string -> serialItemId via Stock avant le OUT.
+      //    Si le OUT plante, on bubble et on marque PAS COMPLETED.
       let movementsCreated = 0;
       for (const g of grouped.values()) {
+        // On a besoin de savoir si le produit est SN-trace
+        const meta = await stock.getProduct(g.productId).catch(() => null);
+        const isSerialTracked = !!meta?.hasSerialNumber;
+
+        if (!isSerialTracked) {
+          // Cas simple : mouvement quantitatif
+          await stock.createMovement({
+            productId: g.productId,
+            type: 'OUT',
+            quantity: g.quantity,
+            condition: 'NEW',
+            movementDate: new Date().toISOString(),
+            sourceSiteId: atelier.id,
+            comment: `Assemblage ${body.internalNumber || existing.internalNumber} (${existing.productionOrder.model})`,
+          });
+          movementsCreated++;
+          continue;
+        }
+
+        // Produit SN-trace : on ne compte que les composants avec SN
+        const validSerials = g.serials.filter((s) => s.trim().length > 0);
+        if (validSerials.length === 0) {
+          // Aucun SN saisi pour ce produit SN-trace -> on skip le mouvement
+          // Stock (on ne peut pas OUT une unite sans SN). Log pour audit.
+          console.warn(
+            `[assembly] SKIP OUT produit ${g.productId} : ${g.quantity} unite(s) sans SN sur assembly ${id}`,
+          );
+          continue;
+        }
+
+        // Resout les SN string -> serialItemIds via Stock
+        const serialItems = await stock.getSerialItems(g.productId, { status: 'IN_STOCK' });
+        const serialToId = new Map(
+          serialItems.filter((s) => s.serialNumber).map((s) => [s.serialNumber!, s.id]),
+        );
+        const serialItemIds: string[] = [];
+        const notFound: string[] = [];
+        for (const sn of validSerials) {
+          const sid = serialToId.get(sn);
+          if (sid) serialItemIds.push(sid);
+          else notFound.push(sn);
+        }
+        if (notFound.length > 0) {
+          throw new AppError(
+            `SN introuvables cote Stock pour produit ${g.productId} : ${notFound.join(', ')}`,
+            400,
+          );
+        }
+
         await stock.createMovement({
           productId: g.productId,
           type: 'OUT',
-          quantity: g.quantity,
+          quantity: serialItemIds.length,
           condition: 'NEW',
           movementDate: new Date().toISOString(),
           sourceSiteId: atelier.id,
           comment: `Assemblage ${body.internalNumber || existing.internalNumber} (${existing.productionOrder.model})`,
-          ...(g.serials.length > 0 ? { serialNumbers: g.serials } : {}),
+          serialItemIds,
         });
         movementsCreated++;
       }
