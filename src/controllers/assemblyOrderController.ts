@@ -635,18 +635,70 @@ export async function checklist(req: AuthenticatedRequest, res: Response, next: 
       };
     });
 
-    // Components installed but not in the BOM
+    // Components installed but not in the BOM. Enrichis avec description
+    // et categorie via Stock (N+1 fetch : accepte ici car assembly a
+    // typiquement < 20 composants).
     const bomProductIds = new Set(at.items.map((it) => it.productId));
-    const extras = order.components
-      .filter((c) => !bomProductIds.has(c.productId))
-      .map((c) => ({
+    const extraComponents = order.components.filter((c) => !bomProductIds.has(c.productId));
+
+    const extraProductIds = Array.from(new Set(extraComponents.map((c) => c.productId)));
+    const extraProductsMeta = new Map<
+      string,
+      { description: string | null; productCategoryId: string | null }
+    >();
+    await Promise.all(
+      extraProductIds.map(async (pid) => {
+        try {
+          const p = await stock.getProduct(pid);
+          extraProductsMeta.set(pid, {
+            description: p.description ?? null,
+            productCategoryId: p.productCategoryId ?? null,
+          });
+        } catch {
+          extraProductsMeta.set(pid, { description: null, productCategoryId: null });
+        }
+      }),
+    );
+
+    // Charge les noms de catégorie une seule fois pour tous les extras.
+    const categoryIds = Array.from(
+      new Set(
+        Array.from(extraProductsMeta.values())
+          .map((m) => m.productCategoryId)
+          .filter((c): c is string => !!c),
+      ),
+    );
+    const categoriesById = new Map<string, { id: string; name: string }>();
+    if (categoryIds.length > 0) {
+      try {
+        const allCats = await stock.getProductCategories();
+        for (const cat of allCats) {
+          if (categoryIds.includes(cat.id)) {
+            categoriesById.set(cat.id, { id: cat.id, name: cat.name });
+          }
+        }
+      } catch {
+        /* pas grave, on affichera juste sans nom de categorie */
+      }
+    }
+
+    const extras = extraComponents.map((c) => {
+      const meta = extraProductsMeta.get(c.productId);
+      const cat = meta?.productCategoryId
+        ? categoriesById.get(meta.productCategoryId)
+        : undefined;
+      return {
         id: c.id,
         productId: c.productId,
         productReference: c.productReference,
+        productDescription: meta?.description ?? null,
+        productCategoryId: meta?.productCategoryId ?? null,
+        productCategoryName: cat?.name ?? null,
         serialNumber: c.serialNumber,
         quantity: c.quantity,
         installedAt: c.installedAt,
-      }));
+      };
+    });
 
     // Selections par ProductCategory (mode "matrice" : 1 ligne = 1 categorie).
     // Renvoie uniquement les composants qui ont un productCategoryId non null.
